@@ -4,9 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*' # Trigger on version tag pushes (e.g., v0.7.1)
+    branches:
+      - peakflames/main # Trigger on pushes to peakflames/main branch
   pull_request:
     branches:
-      - main     # Trigger on PRs targeting main branch
+      - main            # Trigger on PRs targeting main branch
+      - peakflames/main # Trigger on PRs targeting peakflames/main branch
   workflow_dispatch: {} # Allow manual triggering from the Actions tab
 
 env:
@@ -41,6 +44,8 @@ jobs:
           tags: |
             # Create 'main' tag on push to main branch
             type=ref,event=branch,branch=main
+            # Create 'peakflames-main' tag on push to peakflames/main branch
+            type=ref,event=branch,branch=peakflames/main
             # Create 'X.Y.Z', 'X.Y', 'X' tags on tag push (e.g., v1.2.3 -> 1.2.3, 1.2, 1)
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
