@@ -11,15 +11,14 @@ on:
   workflow_dispatch: {} # Allow manual triggering from the Actions tab
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: docker.io
+  IMAGE_NAME: peakflames/mcp-atlassian
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read  # Needed for checkout
-      packages: write # Needed to push packages to ghcr.io
 
     steps:
       - name: Checkout repository
@@ -54,14 +53,14 @@ jobs:
             # For manual workflow runs, use branch name with 'manual' suffix
             type=raw,value={{branch}}-manual,enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         # Only login for pushes and manual runs, not for PRs
         if: github.event_name != 'pull_request'
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push Docker image
         id: docker_build
