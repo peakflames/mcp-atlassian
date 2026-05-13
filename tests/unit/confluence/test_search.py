@@ -566,6 +566,61 @@ class TestSearchMixin:
         assert results[0].title == "Test User"
         assert results[0].entity_type == "user"
 
+    def test_search_excludes_blocked_spaces(self, search_mixin):
+        """Blocked spaces must be appended as space != / NOT IN to the CQL."""
+        search_mixin.config.spaces_filter = None
+        search_mixin.config.spaces_blocked = "LEGAL"
+        search_mixin.confluence.cql.return_value = {
+            "results": [],
+            "totalSize": 0,
+            "start": 0,
+            "limit": 10,
+        }
+
+        search_mixin.search("type = page AND space = DEV")
+
+        call_args = search_mixin.confluence.cql.call_args
+        actual_cql = call_args[1].get("cql") if call_args[1] else call_args[0][0]
+        assert "LEGAL" in actual_cql
+        assert "space !=" in actual_cql or "space NOT IN" in actual_cql
+
+    def test_search_excludes_multiple_blocked_spaces(self, search_mixin):
+        """Multiple blocked spaces produce a space NOT IN list."""
+        search_mixin.config.spaces_filter = None
+        search_mixin.config.spaces_blocked = "LEGAL,HR"
+        search_mixin.confluence.cql.return_value = {
+            "results": [],
+            "totalSize": 0,
+            "start": 0,
+            "limit": 10,
+        }
+
+        search_mixin.search("type = page")
+
+        call_args = search_mixin.confluence.cql.call_args
+        actual_cql = call_args[1].get("cql") if call_args[1] else call_args[0][0]
+        assert "space NOT IN" in actual_cql
+        assert "LEGAL" in actual_cql
+        assert "HR" in actual_cql
+
+    def test_search_readonly_spaces_not_excluded(self, search_mixin):
+        """Read-only spaces must NOT be excluded from CQL search."""
+        search_mixin.config.spaces_filter = None
+        search_mixin.config.spaces_blocked = None
+        search_mixin.config.spaces_readonly = "LEGACY"
+        search_mixin.confluence.cql.return_value = {
+            "results": [],
+            "totalSize": 0,
+            "start": 0,
+            "limit": 10,
+        }
+
+        search_mixin.search("type = page")
+
+        call_args = search_mixin.confluence.cql.call_args
+        actual_cql = call_args[1].get("cql") if call_args[1] else call_args[0][0]
+        assert "LEGACY" not in actual_cql
+
 
 class TestSearchUserServerDC:
     """Tests for Server/DC user search via group member API fallback."""

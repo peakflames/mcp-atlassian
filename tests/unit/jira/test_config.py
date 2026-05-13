@@ -401,3 +401,62 @@ def test_from_env_oauth_enable_with_server_url():
         assert config.url == "https://jira.example.com"
         assert config.auth_type == "oauth"
         assert config.is_cloud is False
+
+
+# ---------------------------------------------------------------------------
+# Per-project permission overrides: from_env + cached_property sets
+# ---------------------------------------------------------------------------
+
+
+def test_from_env_projects_readonly_and_blocked():
+    """from_env should populate projects_readonly and projects_blocked fields."""
+    with patch.dict(
+        os.environ,
+        {
+            "JIRA_URL": "https://test.atlassian.net",
+            "JIRA_USERNAME": "u",
+            "JIRA_API_TOKEN": "t",
+            "JIRA_PROJECTS_READONLY": "SYSPR, legacy ",
+            "JIRA_PROJECTS_BLOCKED": "PLE,SECRET",
+        },
+        clear=True,
+    ):
+        config = JiraConfig.from_env()
+        assert config.projects_readonly == "SYSPR, legacy "
+        assert config.projects_blocked == "PLE,SECRET"
+
+
+def test_projects_readonly_set_normalises():
+    """projects_readonly_set should uppercase and strip whitespace."""
+    config = JiraConfig(
+        url="https://test.atlassian.net",
+        auth_type="basic",
+        username="u",
+        api_token="t",
+        projects_readonly=" syspr , legacy ",
+    )
+    assert config.projects_readonly_set == frozenset({"SYSPR", "LEGACY"})
+
+
+def test_projects_blocked_set_normalises():
+    """projects_blocked_set should uppercase and strip whitespace."""
+    config = JiraConfig(
+        url="https://test.atlassian.net",
+        auth_type="basic",
+        username="u",
+        api_token="t",
+        projects_blocked="ple,SECRET",
+    )
+    assert config.projects_blocked_set == frozenset({"PLE", "SECRET"})
+
+
+def test_projects_sets_empty_when_not_set():
+    """Both cached sets should be empty frozensets when env vars are absent."""
+    config = JiraConfig(
+        url="https://test.atlassian.net",
+        auth_type="basic",
+        username="u",
+        api_token="t",
+    )
+    assert config.projects_readonly_set == frozenset()
+    assert config.projects_blocked_set == frozenset()

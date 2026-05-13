@@ -11,6 +11,7 @@ from ..exceptions import MCPAtlassianAuthenticationError
 from ..models.jira import JiraIssue
 from ..models.jira.common import JiraChangelog
 from ..utils import parse_date
+from ..utils.access_control import ProjectAccessError, check_jira_project_access
 from .client import JiraClient
 from .constants import DEFAULT_READ_JIRA_FIELDS
 from .protocols import (
@@ -68,27 +69,27 @@ class IssuesMixin(
             MCPAtlassianAuthenticationError: If authentication fails with the Jira API (401/403)
             Exception: If there is an error retrieving the issue
         """
+        # Access-control checks run BEFORE the API call (outside the exception handler)
+        issue_key_project = issue_key.split("-")[0]
+
+        # Apply whitelist filter if present
+        filter_to_use = self.config.projects_filter
+        if filter_to_use:
+            projects = [p.strip() for p in filter_to_use.split(",")]
+            if issue_key_project not in projects:
+                msg = (
+                    "Issue with project prefix "
+                    f"'{issue_key_project}' are restricted by configuration"
+                )
+                raise ValueError(msg)
+
+        # Check BLOCKED / READONLY access controls
         try:
-            # Obtain the projects filter from the config.
-            # These should NOT be overridden by the request.
-            filter_to_use = self.config.projects_filter
+            check_jira_project_access(self.config, issue_key_project, write=False)
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
 
-            # Apply projects filter if present
-            if filter_to_use:
-                # Split projects filter by commas and handle possible whitespace
-                projects = [p.strip() for p in filter_to_use.split(",")]
-
-                # Obtain the project key from issue_key
-                issue_key_project = issue_key.split("-")[0]
-
-                if issue_key_project not in projects:
-                    # If the project key not in the filter, return an empty issue
-                    msg = (
-                        "Issue with project prefix "
-                        f"'{issue_key_project}' are restricted by configuration"
-                    )
-                    raise ValueError(msg)
-
+        try:
             # Determine fields_param: use provided fields or default from constant
             fields_param = fields
             if fields_param is None:

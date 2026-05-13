@@ -26,6 +26,10 @@ class TestSearchMixin:
         mixin.config = MagicMock()
         mixin.config.is_cloud = False
         mixin.config.projects_filter = None
+        mixin.config.projects_blocked = None
+        mixin.config.projects_readonly = None
+        mixin.config.projects_blocked_set = frozenset()
+        mixin.config.projects_readonly_set = frozenset()
         mixin.config.url = "https://example.atlassian.net"
 
         return mixin
@@ -1204,3 +1208,71 @@ class TestSearchMixin:
         )
         # The result should not have a next_page_token from Server/DC
         assert result.next_page_token is None
+
+    def test_search_issues_excludes_blocked_projects(
+        self, search_mixin: SearchMixin, mock_issues_response: dict
+    ):
+        """Blocked projects must be appended as NOT IN to the JQL."""
+        search_mixin.config.projects_filter = None
+        search_mixin.config.projects_blocked = "PRIV"
+        search_mixin.config.projects_blocked_set = frozenset({"PRIV"})
+        search_mixin.config.url = "https://example.atlassian.net"
+        search_mixin.jira.jql.return_value = mock_issues_response
+
+        search_mixin.search_issues("text ~ 'test'")
+
+        call_args = search_mixin.jira.jql.call_args
+        actual_jql = call_args[0][0] if call_args[0] else call_args[1].get("jql", "")
+        assert "project != PRIV" in actual_jql or "project NOT IN" in actual_jql
+
+    def test_search_issues_blocked_multiple_projects(
+        self, search_mixin: SearchMixin, mock_issues_response: dict
+    ):
+        """Multiple blocked projects produce a NOT IN list."""
+        search_mixin.config.projects_filter = None
+        search_mixin.config.projects_blocked = "PRIV,SECRET"
+        search_mixin.config.projects_blocked_set = frozenset({"PRIV", "SECRET"})
+        search_mixin.config.url = "https://example.atlassian.net"
+        search_mixin.jira.jql.return_value = mock_issues_response
+
+        search_mixin.search_issues("text ~ 'test'")
+
+        call_args = search_mixin.jira.jql.call_args
+        actual_jql = call_args[0][0] if call_args[0] else call_args[1].get("jql", "")
+        assert "project NOT IN" in actual_jql
+        assert "PRIV" in actual_jql
+        assert "SECRET" in actual_jql
+
+    def test_search_issues_blocked_with_whitelist(
+        self, search_mixin: SearchMixin, mock_issues_response: dict
+    ):
+        """Blocked exclusion is appended on top of an existing whitelist filter."""
+        search_mixin.config.projects_filter = "SAFE"
+        search_mixin.config.projects_blocked = "PRIV"
+        search_mixin.config.projects_blocked_set = frozenset({"PRIV"})
+        search_mixin.config.url = "https://example.atlassian.net"
+        search_mixin.jira.jql.return_value = mock_issues_response
+
+        search_mixin.search_issues("text ~ 'test'")
+
+        call_args = search_mixin.jira.jql.call_args
+        actual_jql = call_args[0][0] if call_args[0] else call_args[1].get("jql", "")
+        assert "project = SAFE" in actual_jql or "project IN" in actual_jql
+        assert "project != PRIV" in actual_jql or "project NOT IN" in actual_jql
+
+    def test_search_issues_readonly_not_excluded(
+        self, search_mixin: SearchMixin, mock_issues_response: dict
+    ):
+        """Read-only projects must NOT be excluded from search results."""
+        search_mixin.config.projects_filter = None
+        search_mixin.config.projects_blocked = None
+        search_mixin.config.projects_blocked_set = frozenset()
+        search_mixin.config.projects_readonly = "RO"
+        search_mixin.config.url = "https://example.atlassian.net"
+        search_mixin.jira.jql.return_value = mock_issues_response
+
+        search_mixin.search_issues("text ~ 'test'")
+
+        call_args = search_mixin.jira.jql.call_args
+        actual_jql = call_args[0][0] if call_args[0] else call_args[1].get("jql", "")
+        assert "RO" not in actual_jql
