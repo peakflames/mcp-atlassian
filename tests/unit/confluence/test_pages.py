@@ -2944,3 +2944,54 @@ class TestPageHierarchy:
 
         assert result["total_pages"] == 1
         assert result["has_more"] is False
+
+    def test_get_page_content_rejected_when_space_blocked(self, pages_mixin):
+        """get_page_content must raise ValueError when the page's space is BLOCKED."""
+        pages_mixin.config.url = "https://example.atlassian.net/wiki"
+        pages_mixin.config.spaces_blocked = "LEGAL"
+        # The fixture's confluence mock returns space.key = "PROJ" by default,
+        # so we need to override to return a LEGAL-space page.
+        pages_mixin.confluence.get_page_by_id.return_value = {
+            "id": "999",
+            "title": "Confidential",
+            "type": "page",
+            "status": "current",
+            "space": {"key": "LEGAL", "name": "Legal Space"},
+            "version": {"number": 1},
+            "body": {"storage": {"value": "<p>secret</p>"}},
+            "children": {"attachment": {"results": []}},
+            "_links": {"webui": "/display/LEGAL/Confidential"},
+        }
+
+        with pytest.raises(ValueError, match="blocked"):
+            pages_mixin.get_page_content("999")
+
+    def test_get_page_content_allowed_when_space_readonly(self, pages_mixin):
+        """get_page_content must succeed (read allowed) when the space is READONLY."""
+        pages_mixin.config.url = "https://example.atlassian.net/wiki"
+        pages_mixin.config.spaces_blocked = None
+        pages_mixin.config.spaces_readonly = "PROJ"
+        # The default fixture mock page is in space "PROJ"
+
+        result = pages_mixin.get_page_content("987654321")
+        assert result is not None
+
+    def test_get_page_space_key_returns_space(self, pages_mixin):
+        """get_page_space_key should return the space key from the API response."""
+        pages_mixin.confluence.get_page_by_id.return_value = {
+            "id": "123",
+            "space": {"key": "DEV", "name": "Dev Space"},
+        }
+
+        result = pages_mixin.get_page_space_key("123")
+        assert result == "DEV"
+        pages_mixin.confluence.get_page_by_id.assert_called_once_with(
+            page_id="123", expand="space"
+        )
+
+    def test_get_page_space_key_returns_none_on_error(self, pages_mixin):
+        """get_page_space_key should return None when the API call fails."""
+        pages_mixin.confluence.get_page_by_id.side_effect = Exception("not found")
+
+        result = pages_mixin.get_page_space_key("999")
+        assert result is None
