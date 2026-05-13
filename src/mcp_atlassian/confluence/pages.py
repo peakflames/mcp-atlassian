@@ -8,6 +8,7 @@ import requests
 from requests.exceptions import HTTPError
 
 from ..models.confluence import ConfluencePage
+from ..utils.access_control import ProjectAccessError, check_confluence_space_access
 from ..utils.decorators import handle_auth_errors
 from .client import ConfluenceClient
 from .utils import emoji_to_hex_id, extract_emoji_from_property
@@ -30,6 +31,23 @@ class PagesMixin(ConfluenceClient):
             return ConfluenceV2Adapter(
                 session=self.confluence._session, base_url=self.confluence.url
             )
+        return None
+
+    def get_page_space_key(self, page_id: str) -> str | None:
+        """Return the space key for a page without fetching full content.
+
+        Args:
+            page_id: The ID of the Confluence page.
+
+        Returns:
+            The space key string, or ``None`` if it cannot be determined.
+        """
+        try:
+            page = self.confluence.get_page_by_id(page_id=page_id, expand="space")
+            if isinstance(page, dict):
+                return page.get("space", {}).get("key") or None
+        except Exception as e:
+            logger.debug(f"Could not resolve space key for page {page_id}: {e}")
         return None
 
     @handle_auth_errors("Confluence API")
@@ -81,6 +99,14 @@ class PagesMixin(ConfluenceClient):
                 raise Exception(error_msg)
 
             space_key = page.get("space", {}).get("key", "")
+
+            # Enforce BLOCKED access control after fetching the page
+            if space_key:
+                try:
+                    check_confluence_space_access(self.config, space_key, write=False)
+                except ProjectAccessError as exc:
+                    raise ValueError(str(exc)) from exc
+
             try:
                 content = page["body"]["storage"]["value"]
             except (KeyError, TypeError) as e:
@@ -118,6 +144,8 @@ class PagesMixin(ConfluenceClient):
             )
         except HTTPError:
             raise  # let decorator handle auth errors
+        except ValueError:
+            raise  # access-control errors must propagate unchanged
         except Exception as e:
             logger.error(
                 f"Error retrieving page content for page ID {page_id}: {str(e)}"

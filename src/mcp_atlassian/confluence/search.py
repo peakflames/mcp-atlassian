@@ -64,6 +64,29 @@ class SearchMixin(ConfluenceClient):
 
             logger.info(f"Applied spaces filter to query: {cql}")
 
+        # Inject BLOCKED spaces as a NOT IN exclusion
+        blocked_set = self.config.spaces_blocked_set
+        if blocked_set:
+            blocked_spaces = sorted(blocked_set)
+            if len(blocked_spaces) == 1:
+                quoted = quote_cql_identifier_if_needed(blocked_spaces[0])
+                blocked_query = f"space != {quoted}"
+            else:
+                quoted_blocked = [
+                    quote_cql_identifier_if_needed(s) for s in blocked_spaces
+                ]
+                blocked_list = ", ".join(quoted_blocked)
+                blocked_query = f"space NOT IN ({blocked_list})"
+
+            if not cql:
+                cql = blocked_query
+            elif "space " not in cql.lower() and "space=" not in cql.lower():
+                cql = f"({cql}) AND ({blocked_query})"
+            else:
+                cql = f"({cql}) AND ({blocked_query})"
+
+            logger.info(f"Applied blocked spaces exclusion to query: {cql}")
+
         # Execute the CQL search query
         results = self.confluence.cql(cql=cql, limit=limit)
 

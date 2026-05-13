@@ -1589,13 +1589,11 @@ class TestIssuesMixin:
         # Mock the API to raise an exception
         issues_mixin.jira.get_issue.side_effect = Exception("API error")
 
-        # Call the method and verify it raises the expected exception
+        # Call the method and verify it raises the expected exception.
+        # The filter check runs before the try block, so the error is not re-wrapped.
         with pytest.raises(
-            Exception,
-            match=(
-                "Error retrieving issue TEST-123: "
-                "Issue with project prefix 'TEST' are restricted by configuration"
-            ),
+            ValueError,
+            match="Issue with project prefix 'TEST' are restricted by configuration",
         ):
             issues_mixin.get_issue("TEST-123")
 
@@ -1737,3 +1735,46 @@ class TestIssuesMixin:
         assert isinstance(result, JiraIssue)
         assert result.key == "DEV-123"
         assert result.summary == "Development issue"
+
+    def test_get_issue_rejected_when_project_blocked(
+        self, issues_mixin: IssuesMixin, make_issue_data
+    ):
+        """get_issue must raise ValueError when the project is BLOCKED."""
+        issues_mixin.config.projects_filter = None
+        issues_mixin.config.projects_blocked = "PRIV"
+        issues_mixin.jira.get_issue.return_value = make_issue_data(key="PRIV-1")
+
+        with pytest.raises(ValueError, match="blocked"):
+            issues_mixin.get_issue("PRIV-1")
+
+    def test_get_issue_allowed_when_project_readonly(
+        self, issues_mixin: IssuesMixin, make_issue_data
+    ):
+        """get_issue must succeed (read allowed) when the project is READONLY."""
+        issues_mixin.config.projects_filter = None
+        issues_mixin.config.projects_readonly = "RO"
+        issues_mixin.jira.get_issue.return_value = make_issue_data(key="RO-1")
+
+        result = issues_mixin.get_issue("RO-1")
+        assert result is not None
+
+    def test_get_issue_blocked_wins_over_readonly(self, issues_mixin: IssuesMixin):
+        """When a project is in both BLOCKED and READONLY, blocked takes precedence."""
+        issues_mixin.config.projects_filter = None
+        issues_mixin.config.projects_blocked = "PRIV"
+        issues_mixin.config.projects_readonly = "PRIV"
+
+        with pytest.raises(ValueError, match="blocked"):
+            issues_mixin.get_issue("PRIV-99")
+
+    def test_get_issue_unrelated_project_passes(
+        self, issues_mixin: IssuesMixin, make_issue_data
+    ):
+        """get_issue works normally for projects not in any restriction list."""
+        issues_mixin.config.projects_filter = None
+        issues_mixin.config.projects_blocked = "PRIV"
+        issues_mixin.config.projects_readonly = "RO"
+        issues_mixin.jira.get_issue.return_value = make_issue_data(key="SAFE-1")
+
+        result = issues_mixin.get_issue("SAFE-1")
+        assert result is not None

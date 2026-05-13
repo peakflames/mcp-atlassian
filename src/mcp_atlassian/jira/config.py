@@ -3,6 +3,7 @@
 import logging
 import os
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Literal
 
 from ..utils.env import get_custom_headers, is_env_ssl_verify
@@ -103,6 +104,8 @@ class JiraConfig:
     oauth_config: OAuthConfig | BYOAccessTokenOAuthConfig | None = None
     ssl_verify: bool = True  # Whether to verify SSL certificates
     projects_filter: str | None = None  # List of project keys to filter searches
+    projects_readonly: str | None = None  # Projects restricted to read-only access
+    projects_blocked: str | None = None  # Projects with all access blocked
     http_proxy: str | None = None  # HTTP proxy URL
     https_proxy: str | None = None  # HTTPS proxy URL
     no_proxy: str | None = None  # Comma-separated list of hosts to bypass proxy
@@ -154,6 +157,32 @@ class JiraConfig:
             The ssl_verify value
         """
         return self.ssl_verify
+
+    @cached_property
+    def projects_readonly_set(self) -> frozenset[str]:
+        """Normalized set of read-only project keys (uppercase, whitespace-stripped).
+
+        Returns:
+            frozenset of project keys that are restricted to read access only.
+        """
+        if not self.projects_readonly:
+            return frozenset()
+        return frozenset(
+            k.strip().upper() for k in self.projects_readonly.split(",") if k.strip()
+        )
+
+    @cached_property
+    def projects_blocked_set(self) -> frozenset[str]:
+        """Normalized set of fully blocked project keys (uppercase, whitespace-stripped).
+
+        Returns:
+            frozenset of project keys where all access is denied.
+        """
+        if not self.projects_blocked:
+            return frozenset()
+        return frozenset(
+            k.strip().upper() for k in self.projects_blocked.split(",") if k.strip()
+        )
 
     @classmethod
     def from_env(cls) -> "JiraConfig":
@@ -235,8 +264,10 @@ class JiraConfig:
         # SSL verification (for Server/DC)
         ssl_verify = is_env_ssl_verify("JIRA_SSL_VERIFY")
 
-        # Get the projects filter if provided
+        # Get the projects filter and per-project permission overrides
         projects_filter = os.getenv("JIRA_PROJECTS_FILTER")
+        projects_readonly = os.getenv("JIRA_PROJECTS_READONLY")
+        projects_blocked = os.getenv("JIRA_PROJECTS_BLOCKED")
 
         # Proxy settings
         http_proxy = os.getenv("JIRA_HTTP_PROXY", os.getenv("HTTP_PROXY"))
@@ -271,6 +302,8 @@ class JiraConfig:
             oauth_config=oauth_config,
             ssl_verify=ssl_verify,
             projects_filter=projects_filter,
+            projects_readonly=projects_readonly,
+            projects_blocked=projects_blocked,
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             no_proxy=no_proxy,
