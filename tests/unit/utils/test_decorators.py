@@ -141,3 +141,149 @@ def test_handle_auth_errors_passes_through_no_response():
 
     with pytest.raises(HTTPError):
         Svc().fail()
+
+
+# ---------------------------------------------------------------------------
+# Per-project / per-space write access checks in check_write_access
+# ---------------------------------------------------------------------------
+
+
+def _make_jira_config(projects_blocked=None, projects_readonly=None):
+    from mcp_atlassian.jira.config import JiraConfig
+
+    return JiraConfig(
+        url="https://test.atlassian.net",
+        auth_type="basic",
+        username="u",
+        api_token="t",
+        projects_blocked=projects_blocked,
+        projects_readonly=projects_readonly,
+    )
+
+
+def _make_conf_config(spaces_blocked=None, spaces_readonly=None):
+    from mcp_atlassian.confluence.config import ConfluenceConfig
+
+    return ConfluenceConfig(
+        url="https://test.atlassian.net/wiki",
+        auth_type="basic",
+        username="u",
+        api_token="t",
+        spaces_blocked=spaces_blocked,
+        spaces_readonly=spaces_readonly,
+    )
+
+
+class ContextWithAccess:
+    """Context that exposes jira/confluence config on the lifespan app context."""
+
+    def __init__(self, *, read_only=False, jira_config=None, conf_config=None):
+        app_ctx = MagicMock()
+        app_ctx.read_only = read_only
+        app_ctx.full_jira_config = jira_config
+        app_ctx.full_confluence_config = conf_config
+        self.request_context = MagicMock()
+        self.request_context.lifespan_context = {"app_lifespan_context": app_ctx}
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_rejects_blocked_project():
+    """Writes to a BLOCKED project must raise ToolError."""
+
+    @check_write_access
+    async def create_issue(ctx, issue_key):
+        return "ok"
+
+    jira_cfg = _make_jira_config(projects_blocked="PRIV")
+    ctx = ContextWithAccess(jira_config=jira_cfg)
+    with pytest.raises(ToolError, match="blocked"):
+        await create_issue(ctx, issue_key="PRIV-1")
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_rejects_readonly_on_write():
+    """Writes to a READONLY project must raise ToolError."""
+
+    @check_write_access
+    async def update_issue(ctx, issue_key):
+        return "ok"
+
+    jira_cfg = _make_jira_config(projects_readonly="LEGACY")
+    ctx = ContextWithAccess(jira_config=jira_cfg)
+    with pytest.raises(ToolError, match="read-only"):
+        await update_issue(ctx, issue_key="LEGACY-5")
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_allows_non_restricted_project():
+    """Writes to an unrestricted project must succeed."""
+
+    @check_write_access
+    async def create_issue(ctx, project_key):
+        return "created"
+
+    jira_cfg = _make_jira_config(projects_blocked="PRIV", projects_readonly="RO")
+    ctx = ContextWithAccess(jira_config=jira_cfg)
+    result = await create_issue(ctx, project_key="SAFE")
+    assert result == "created"
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_rejects_blocked_confluence_space():
+    """Writes to a BLOCKED Confluence space must raise ToolError."""
+
+    @check_write_access
+    async def create_page(ctx, space_key, title):
+        return "ok"
+
+    conf_cfg = _make_conf_config(spaces_blocked="LEGAL")
+    ctx = ContextWithAccess(conf_config=conf_cfg)
+    with pytest.raises(ToolError, match="blocked"):
+        await create_page(ctx, space_key="LEGAL", title="Test")
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_rejects_readonly_confluence_space():
+    """Writes to a READONLY Confluence space must raise ToolError."""
+
+    @check_write_access
+    async def update_page(ctx, space_key):
+        return "ok"
+
+    conf_cfg = _make_conf_config(spaces_readonly="LEGACY")
+    ctx = ContextWithAccess(conf_config=conf_cfg)
+    with pytest.raises(ToolError, match="read-only"):
+        await update_page(ctx, space_key="LEGACY")
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_batch_rejects_blocked_project():
+    """batch_create_issues must be rejected when any item is in a BLOCKED project."""
+
+    @check_write_access
+    async def batch_create_issues(ctx, issues_data):
+        return "ok"
+
+    import json
+
+    issues = [
+        {"project_key": "SAFE", "summary": "ok"},
+        {"project_key": "PRIV", "summary": "blocked"},
+    ]
+    jira_cfg = _make_jira_config(projects_blocked="PRIV")
+    ctx = ContextWithAccess(jira_config=jira_cfg)
+    with pytest.raises(ToolError, match="blocked"):
+        await batch_create_issues(ctx, issues_data=json.dumps(issues))
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_no_config_allows_all():
+    """When no jira/confluence config is present, writes are unrestricted."""
+
+    @check_write_access
+    async def create_issue(ctx, issue_key):
+        return "ok"
+
+    ctx = ContextWithAccess()  # no jira_config, no conf_config
+    result = await create_issue(ctx, issue_key="ANYTHING-1")
+    assert result == "ok"

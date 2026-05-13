@@ -44,11 +44,17 @@ def handle_tool_errors(func: F) -> F:
 
 def check_write_access(func: F) -> F:
     """
-    Decorator for FastMCP tools to check if the application is in read-only mode.
-    If in read-only mode, it raises a ToolError.
-    Also catches unhandled exceptions and re-raises them as ToolError with
-    descriptive error messages.
-    Assumes the decorated function is async and has `ctx: Context` as its first argument.
+    Decorator for FastMCP tools to check if the application is in read-only mode
+    and to enforce per-project/space BLOCKED and READONLY access controls.
+
+    Raises a ToolError when:
+    - The server is in global read-only mode.
+    - The target Jira project is in JIRA_PROJECTS_BLOCKED or JIRA_PROJECTS_READONLY.
+    - The target Confluence space is in CONFLUENCE_SPACES_BLOCKED or
+      CONFLUENCE_SPACES_READONLY.
+
+    Assumes the decorated function is async and has ``ctx: Context`` as its first
+    argument.
     """
     tool_name = func.__name__
 
@@ -68,6 +74,103 @@ def check_write_access(func: F) -> F:
             )  # e.g., "create_issue" -> "create issue"
             logger.warning(f"Attempted to call tool '{tool_name}' in read-only mode.")
             raise ValueError(f"Cannot {action_description} in read-only mode.")
+
+        # Per-project / per-space write access control
+        if app_lifespan_ctx is not None:
+            # Late import avoids circular dependency at module load time
+            from mcp_atlassian.utils.access_control import (  # noqa: PLC0415
+                ProjectAccessError,
+                check_confluence_space_access,
+                check_jira_project_access,
+                extract_jira_project_key,
+            )
+
+            # --- Jira project checks ---
+            jira_config = app_lifespan_ctx.full_jira_config
+            if jira_config is not None and (
+                jira_config.projects_blocked_set or jira_config.projects_readonly_set
+            ):
+                project_keys_to_check: list[str] = []
+
+                direct_project_key = kwargs.get("project_key")
+                if direct_project_key:
+                    project_keys_to_check.append(str(direct_project_key))
+
+                for kw in ("issue_key", "inward_issue_key", "outward_issue_key"):
+                    ik = kwargs.get(kw)
+                    if ik:
+                        project_keys_to_check.append(extract_jira_project_key(str(ik)))
+
+                for pk in project_keys_to_check:
+                    try:
+                        check_jira_project_access(jira_config, pk, write=True)
+                    except ProjectAccessError as exc:
+                        raise ValueError(str(exc)) from exc
+
+                # batch_create_issues / batch_create_versions embed project_key in JSON
+                issues_data = kwargs.get("issues_data")
+                if issues_data:
+                    import json as _json  # noqa: PLC0415
+
+                    # Parse JSON separately so access-control ValueErrors are not swallowed
+                    try:
+                        issues_list = (
+                            _json.loads(issues_data)
+                            if isinstance(issues_data, str)
+                            else issues_data
+                        )
+                    except (TypeError, _json.JSONDecodeError):
+                        issues_list = None  # Malformed JSON; let the tool surface it
+
+                    if isinstance(issues_list, list):
+                        for item in issues_list:
+                            if isinstance(item, dict):
+                                batch_pk = item.get("project_key")
+                                if batch_pk:
+                                    try:
+                                        check_jira_project_access(
+                                            jira_config, str(batch_pk), write=True
+                                        )
+                                    except ProjectAccessError as exc:
+                                        raise ValueError(str(exc)) from exc
+
+            # --- Confluence space checks ---
+            conf_config = app_lifespan_ctx.full_confluence_config
+            if conf_config is not None and (
+                conf_config.spaces_blocked_set or conf_config.spaces_readonly_set
+            ):
+                space_key = kwargs.get("space_key") or kwargs.get("target_space_key")
+                if space_key:
+                    try:
+                        check_confluence_space_access(
+                            conf_config, str(space_key), write=True
+                        )
+                    except ProjectAccessError as exc:
+                        raise ValueError(str(exc)) from exc
+
+                page_id = kwargs.get("page_id")
+                if page_id:
+                    try:
+                        from mcp_atlassian.servers.dependencies import (  # noqa: PLC0415
+                            get_confluence_fetcher,
+                        )
+
+                        conf_fetcher = await get_confluence_fetcher(ctx)
+                        resolved_space = conf_fetcher.get_page_space_key(str(page_id))
+                        if resolved_space:
+                            try:
+                                check_confluence_space_access(
+                                    conf_config, resolved_space, write=True
+                                )
+                            except ProjectAccessError as exc:
+                                raise ValueError(str(exc)) from exc
+                    except ValueError:
+                        raise
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not resolve space for page '{page_id}' "
+                            f"during write-access check: {e}"
+                        )
 
         return await func(ctx, *args, **kwargs)
 

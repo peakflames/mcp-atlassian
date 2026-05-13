@@ -108,6 +108,39 @@ class SearchMixin(JiraClient, IssueOperationsProto):
 
                 logger.info(f"Applied projects filter to query: {jql}")
 
+            # Inject BLOCKED projects as a NOT IN exclusion
+            blocked_set = self.config.projects_blocked_set
+            if blocked_set:
+                blocked_projects = sorted(blocked_set)
+                blocked_projects_sanitized = [
+                    p.replace("\\", "\\\\").replace('"', '\\"')
+                    for p in blocked_projects
+                ]
+                if len(blocked_projects_sanitized) == 1:
+                    quoted = quote_jql_identifier_if_needed(
+                        blocked_projects_sanitized[0]
+                    )
+                    blocked_query = f"project != {quoted}"
+                else:
+                    quoted_blocked = [
+                        quote_jql_identifier_if_needed(p)
+                        for p in blocked_projects_sanitized
+                    ]
+                    blocked_list = ", ".join(quoted_blocked)
+                    blocked_query = f"project NOT IN ({blocked_list})"
+
+                order_match = re.search(r"\s+(ORDER\s+BY\s+.*)$", jql, re.IGNORECASE)
+                if not jql:
+                    jql = blocked_query
+                elif order_match:
+                    order_clause = order_match.group(1)
+                    jql_without_order = jql[: order_match.start()]
+                    jql = f"({jql_without_order}) AND {blocked_query} {order_clause}"
+                else:
+                    jql = f"({jql}) AND {blocked_query}"
+
+                logger.info(f"Applied blocked projects exclusion to query: {jql}")
+
             # Convert fields to proper format if it's a list/tuple/set
             fields_param: str | None
             if fields is None:  # Use default if None

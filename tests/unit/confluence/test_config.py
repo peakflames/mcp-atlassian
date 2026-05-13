@@ -329,3 +329,62 @@ def test_from_env_oauth_enable_with_server_url():
         assert config.url == "https://confluence.example.com"
         assert config.auth_type == "oauth"
         assert config.is_cloud is False
+
+
+# ---------------------------------------------------------------------------
+# Per-space permission overrides: from_env + cached_property sets
+# ---------------------------------------------------------------------------
+
+
+def test_from_env_spaces_readonly_and_blocked():
+    """from_env should populate spaces_readonly and spaces_blocked fields."""
+    with patch.dict(
+        "os.environ",
+        {
+            "CONFLUENCE_URL": "https://test.atlassian.net/wiki",
+            "CONFLUENCE_USERNAME": "u",
+            "CONFLUENCE_API_TOKEN": "t",
+            "CONFLUENCE_SPACES_READONLY": "LEGACY, archived ",
+            "CONFLUENCE_SPACES_BLOCKED": "LEGAL,HR",
+        },
+        clear=True,
+    ):
+        config = ConfluenceConfig.from_env()
+        assert config.spaces_readonly == "LEGACY, archived "
+        assert config.spaces_blocked == "LEGAL,HR"
+
+
+def test_spaces_readonly_set_normalises():
+    """spaces_readonly_set should uppercase and strip whitespace."""
+    config = ConfluenceConfig(
+        url="https://test.atlassian.net/wiki",
+        auth_type="basic",
+        username="u",
+        api_token="t",
+        spaces_readonly=" legacy , archived ",
+    )
+    assert config.spaces_readonly_set == frozenset({"LEGACY", "ARCHIVED"})
+
+
+def test_spaces_blocked_set_normalises():
+    """spaces_blocked_set should uppercase and strip whitespace."""
+    config = ConfluenceConfig(
+        url="https://test.atlassian.net/wiki",
+        auth_type="basic",
+        username="u",
+        api_token="t",
+        spaces_blocked="legal,HR",
+    )
+    assert config.spaces_blocked_set == frozenset({"LEGAL", "HR"})
+
+
+def test_spaces_sets_empty_when_not_set():
+    """Both cached sets should be empty frozensets when env vars are absent."""
+    config = ConfluenceConfig(
+        url="https://test.atlassian.net/wiki",
+        auth_type="basic",
+        username="u",
+        api_token="t",
+    )
+    assert config.spaces_readonly_set == frozenset()
+    assert config.spaces_blocked_set == frozenset()

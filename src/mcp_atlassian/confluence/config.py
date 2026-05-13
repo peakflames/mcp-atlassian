@@ -3,6 +3,7 @@
 import logging
 import os
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Literal
 
 from ..utils.env import get_custom_headers, is_env_ssl_verify
@@ -31,6 +32,8 @@ class ConfluenceConfig:
     oauth_config: OAuthConfig | BYOAccessTokenOAuthConfig | None = None
     ssl_verify: bool = True  # Whether to verify SSL certificates
     spaces_filter: str | None = None  # List of space keys to filter searches
+    spaces_readonly: str | None = None  # Spaces restricted to read-only access
+    spaces_blocked: str | None = None  # Spaces with all access blocked
     http_proxy: str | None = None  # HTTP proxy URL
     https_proxy: str | None = None  # HTTPS proxy URL
     no_proxy: str | None = None  # Comma-separated list of hosts to bypass proxy
@@ -78,6 +81,32 @@ class ConfluenceConfig:
             The ssl_verify value
         """
         return self.ssl_verify
+
+    @cached_property
+    def spaces_readonly_set(self) -> frozenset[str]:
+        """Normalized set of read-only space keys (uppercase, whitespace-stripped).
+
+        Returns:
+            frozenset of space keys that are restricted to read access only.
+        """
+        if not self.spaces_readonly:
+            return frozenset()
+        return frozenset(
+            k.strip().upper() for k in self.spaces_readonly.split(",") if k.strip()
+        )
+
+    @cached_property
+    def spaces_blocked_set(self) -> frozenset[str]:
+        """Normalized set of fully blocked space keys (uppercase, whitespace-stripped).
+
+        Returns:
+            frozenset of space keys where all access is denied.
+        """
+        if not self.spaces_blocked:
+            return frozenset()
+        return frozenset(
+            k.strip().upper() for k in self.spaces_blocked.split(",") if k.strip()
+        )
 
     @classmethod
     def from_env(cls) -> "ConfluenceConfig":
@@ -162,8 +191,10 @@ class ConfluenceConfig:
         # SSL verification (for Server/DC)
         ssl_verify = is_env_ssl_verify("CONFLUENCE_SSL_VERIFY")
 
-        # Get the spaces filter if provided
+        # Get the spaces filter and per-space permission overrides
         spaces_filter = os.getenv("CONFLUENCE_SPACES_FILTER")
+        spaces_readonly = os.getenv("CONFLUENCE_SPACES_READONLY")
+        spaces_blocked = os.getenv("CONFLUENCE_SPACES_BLOCKED")
 
         # Proxy settings
         http_proxy = os.getenv("CONFLUENCE_HTTP_PROXY", os.getenv("HTTP_PROXY"))
@@ -196,6 +227,8 @@ class ConfluenceConfig:
             oauth_config=oauth_config,
             ssl_verify=ssl_verify,
             spaces_filter=spaces_filter,
+            spaces_readonly=spaces_readonly,
+            spaces_blocked=spaces_blocked,
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             no_proxy=no_proxy,
