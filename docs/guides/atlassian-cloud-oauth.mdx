@@ -1,0 +1,246 @@
+---
+title: "Atlassian Cloud OAuth Proxy Deployment"
+description: "Deploy mcp-atlassian as a shared HTTP service with Atlassian Cloud OAuth 2.0 (3LO) — known workarounds, persistent token storage, and required Developer Console configuration"
+---
+
+This guide covers deploying mcp-atlassian as a persistent HTTP service using the built-in OAuth proxy (`ATLASSIAN_OAUTH_PROXY_ENABLE=true`) against **Atlassian Cloud**. It documents known issues and the workarounds required until upstream fixes land, so you don't have to rediscover them.
+
+<Note>
+This guide targets the `streamable-http` transport with `ATLASSIAN_OAUTH_PROXY_ENABLE=true`. If you are using per-request `Authorization: Bearer` headers instead of the proxy, most of this does not apply.
+</Note>
+
+## Prerequisites
+
+- An Atlassian OAuth 2.0 (3LO) app created at [developer.atlassian.com](https://developer.atlassian.com)
+- **Sharing** distribution enabled on the app (required for the OAuth setup wizard to exchange tokens)
+- A volume or host directory mounted at `/home/app/.mcp-atlassian` for token persistence
+
+---
+
+## 1. Atlassian Developer Console Configuration
+
+These settings must be applied manually in the developer console — they are not captured in any config file and must be re-applied if the OAuth app is recreated.
+
+### Callback URLs
+
+**Tab:** Authorization
+
+Register every redirect URI the server will use. fastmcp constructs the redirect URI as `{PUBLIC_BASE_URL}/callback`:
+
+```
+http://localhost:8080/callback     ← --oauth-setup wizard (local)
+http://localhost:9000/callback     ← local dev server
+https://your-prod-hostname/callback ← production PUBLIC_BASE_URL
+```
+
+<Warning>
+If a redirect URI is not registered, Atlassian rejects authorization with `unauthorized_client: redirect_uri is not registered`. This is the most common first-run failure.
+</Warning>
+
+### Jira API Scopes
+
+**Tab:** Permissions → Jira API
+
+Enable the following classic scopes:
+
+| Scope | Required by |
+|---|---|
+| `read:jira-work` | All Jira read tools |
+| `write:jira-work` | All Jira write tools |
+| `read:jira-user` | User profile and watcher tools |
+
+### Confluence API Scopes
+
+**Tab:** Permissions → Confluence API → Classic scopes
+
+| Scope | Required by |
+|---|---|
+| `read:confluence-content.all` | All Confluence read tools (v1 API) |
+| `write:confluence-content` | All Confluence write tools |
+| `read:confluence-user` | Token validation (`/rest/api/user/current`) |
+| `read:confluence-space.summary` | Space-related tools |
+| `search:confluence` | `confluence_search` — the `/rest/api/search` endpoint requires this explicitly; `read:confluence-content.all` does not cover it |
+
+**Tab:** Permissions → Confluence API → Granular scopes
+
+Granular scopes are required for v2 API endpoints (`/api/v2/...`). Classic scopes alone return `401 Unauthorized; scope does not match` on those paths.
+
+| Scope | Required by |
+|---|---|
+| `read:page:confluence` | `confluence_get_page` (v2 `/api/v2/pages/{id}`) |
+| `write:page:confluence` | `confluence_create_page`, `confluence_update_page` |
+| `read:space:confluence` | Space resolution in page tools |
+| `read:content:confluence` | Tools using v1 `/rest/api/content` (e.g. `confluence_get_page_children`) |
+| `write:content:confluence` | Write tools using v1 `/rest/api/content` |
+
+Make sure `offline_access` is included in `ATLASSIAN_OAUTH_SCOPE` so the server can refresh tokens without requiring users to re-authenticate.
+
+---
+
+## 2. Known Upstream Issues and Workarounds
+
+### 2a. RFC 8707 `resource` parameter breaks token exchange
+
+**Upstream issue:** [sooperset/mcp-atlassian#1137](https://github.com/sooperset/mcp-atlassian/issues/1137)
+
+fastmcp forwards the RFC 8707 `resource` indicator to Atlassian's `/authorize` endpoint. Atlassian Cloud does not support it and rejects the token exchange with:
+
+```
+invalid_target: Incorrect resource parameters
+```
+
+**Workaround:** Patch the line out of fastmcp's `oauth_proxy.py` at image build time using `sed`. Add this `RUN` block to your `Dockerfile` after the `FROM` line:
+
+```dockerfile
+# Workaround for sooperset/mcp-atlassian#1137 — remove once the base image
+# ships a version of fastmcp that omits the resource param for Atlassian Cloud.
+RUN sed -i 's|query_params\["resource"\] = resource|pass  # patched: skip resource for Atlassian Cloud|' \
+    /app/.venv/lib/python3.13/site-packages/fastmcp/server/auth/oauth_proxy.py \
+ && grep -q "patched: skip resource for Atlassian Cloud" \
+    /app/.venv/lib/python3.13/site-packages/fastmcp/server/auth/oauth_proxy.py
+```
+
+The `grep -q` assertion immediately after the `sed` causes the build to **fail loudly** if the base image upgrades fastmcp and the target line moves or changes. Without it, the patch silently becomes a no-op and OAuth breaks at runtime with no obvious cause.
+
+<Warning>
+The path `/app/.venv/lib/python3.13/site-packages/...` encodes the Python version from the base image. If the base image upgrades Python, update the path accordingly.
+</Warning>
+
+**Remove when:** The base image ships a version of fastmcp that does not forward `resource` to Atlassian's `/authorize` endpoint. Delete the entire `RUN` block and bump the `FROM` tag.
+
+### 2b. `confluence_get_space_page_tree` returns 410 Gone
+
+**Upstream issue:** [sooperset/mcp-atlassian#1323](https://github.com/sooperset/mcp-atlassian/issues/1323)
+
+The tool calls the deprecated `/rest/api/content` v1 endpoint, which Atlassian Cloud has removed. Any invocation fails at runtime with HTTP 410 Gone.
+
+**Workaround:** Exclude it from `ENABLED_TOOLS`:
+
+```bash
+# In your Dockerfile or .env — omit confluence_get_space_page_tree from the list
+ENV ENABLED_TOOLS=confluence_get_page,confluence_search,...  # everything except confluence_get_space_page_tree
+```
+
+**Remove when:** Upstream fixes the tool to use the v2 spaces API and the base image is updated. Add `confluence_get_space_page_tree` back to `ENABLED_TOOLS`.
+
+---
+
+## 3. Persistent OAuth Proxy Storage
+
+**Why this matters:** On Linux (Docker/Kubernetes), fastmcp defaults to an in-memory OAuth proxy store with an ephemeral key. Every pod restart wipes all registered MCP client records and issued JTIs, forcing every user to re-authenticate — even though their MCP client (e.g. Claude Desktop) still holds valid tokens.
+
+The fix is a custom storage factory that writes per-key JSON files to the volume-mounted `.mcp-atlassian` directory so state survives restarts.
+
+### The storage factory
+
+Copy [`examples/oauth_storage.py`](https://github.com/peakflames/mcp-atlassian/blob/peakflames/main/examples/oauth_storage.py) into your image and wire it in via environment variables.
+
+Key behaviors:
+- Writes files to `/home/app/.mcp-atlassian/oauth-proxy/` (inside the volume mount)
+- Falls back to `/tmp/mcp-atlassian-oauth-proxy/` if the persistent path is not writable, logging a warning — the server stays up but tokens do not survive restarts
+- Uses `asyncio.to_thread` for all disk I/O so the event loop is never blocked
+- No extra dependencies beyond the Python stdlib
+
+### Dockerfile wiring
+
+```dockerfile
+FROM peakflames/mcp-atlassian:<version>
+
+# ... other config ...
+
+COPY oauth_storage.py /app/oauth_storage.py
+ENV PYTHONPATH=/app
+ENV ATLASSIAN_OAUTH_CLIENT_STORAGE_MODE=factory
+ENV ATLASSIAN_OAUTH_CLIENT_STORAGE_FACTORY=oauth_storage:create_file_store
+```
+
+### Volume mount
+
+The `/home/app/.mcp-atlassian` directory must be mounted as a persistent volume:
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker run -d \
+      -v "${HOME}/.mcp-atlassian:/home/app/.mcp-atlassian" \
+      --env-file .env \
+      -p 9000:9000 \
+      your-image
+    ```
+  </Tab>
+  <Tab title="Kubernetes">
+    ```yaml
+    volumes:
+      - name: mcp-atlassian-storage
+        persistentVolumeClaim:
+          claimName: mcp-atlassian-pvc
+
+    volumeMounts:
+      - name: mcp-atlassian-storage
+        mountPath: /home/app/.mcp-atlassian
+    ```
+
+    <Warning>
+    If the PVC is owned by root and `fsGroup` is not set in `securityContext`, the app user cannot write to the mount. The factory falls back to `/tmp` and logs a warning. Fix by setting `securityContext.fsGroup` to the GID of the `app` user in the container.
+    </Warning>
+  </Tab>
+</Tabs>
+
+### Verifying persistence works
+
+```bash
+# 1. Start the server and complete OAuth in your MCP client
+# 2. Restart the container
+docker restart your-container
+
+# 3. Reconnect your MCP client — it should reconnect without a browser prompt
+# 4. Confirm token files exist on the host
+ls ~/.mcp-atlassian/oauth-proxy/
+```
+
+If you see `.json` files in `oauth-proxy/` and no browser prompt on reconnect, persistence is working.
+
+**Remove when:** A future version of mcp-atlassian ships built-in file-based storage (e.g. `ATLASSIAN_OAUTH_CLIENT_STORAGE_MODE=file`). At that point, delete `oauth_storage.py`, remove the `COPY` / `PYTHONPATH` / `ATLASSIAN_OAUTH_CLIENT_STORAGE_FACTORY` lines from the Dockerfile, and set whatever env var the upstream implementation exposes.
+
+---
+
+## Complete Example Dockerfile
+
+```dockerfile
+FROM peakflames/mcp-atlassian:<version>
+
+# Workaround: sooperset/mcp-atlassian#1137 — fastmcp forwards RFC 8707
+# `resource` to Atlassian's /authorize, which rejects it. Remove once fixed.
+RUN sed -i 's|query_params\["resource"\] = resource|pass  # patched: skip resource for Atlassian Cloud|' \
+    /app/.venv/lib/python3.13/site-packages/fastmcp/server/auth/oauth_proxy.py \
+ && grep -q "patched: skip resource for Atlassian Cloud" \
+    /app/.venv/lib/python3.13/site-packages/fastmcp/server/auth/oauth_proxy.py
+
+ENV TRANSPORT=streamable-http
+ENV PORT=9000
+
+ENV JIRA_URL=https://your-company.atlassian.net
+ENV CONFLUENCE_URL=https://your-company.atlassian.net/wiki
+
+# confluence_get_space_page_tree omitted: uses deprecated v1 API, returns 410 Gone
+# Re-enable once sooperset/mcp-atlassian#1323 is fixed.
+ENV ENABLED_TOOLS=confluence_add_comment,confluence_create_page,confluence_get_page,...
+
+ENV ATLASSIAN_OAUTH_CLIENT_ID=your_client_id
+ENV ATLASSIAN_OAUTH_CLOUD_ID=your_cloud_id
+ENV ATLASSIAN_OAUTH_REDIRECT_URI=https://your-prod-hostname/callback
+ENV ATLASSIAN_OAUTH_SCOPE="read:jira-work read:jira-user write:jira-work read:confluence-content.all write:confluence-content read:confluence-space.summary search:confluence read:page:confluence write:page:confluence read:space:confluence read:content:confluence write:content:confluence offline_access"
+
+ENV ATLASSIAN_OAUTH_PROXY_ENABLE=true
+ENV PUBLIC_BASE_URL=https://your-prod-hostname
+
+# Persistent OAuth storage — remove once mcp-atlassian ships built-in file storage
+COPY oauth_storage.py /app/oauth_storage.py
+ENV PYTHONPATH=/app
+ENV ATLASSIAN_OAUTH_CLIENT_STORAGE_MODE=factory
+ENV ATLASSIAN_OAUTH_CLIENT_STORAGE_FACTORY=oauth_storage:create_file_store
+```
+
+<Note>
+`ATLASSIAN_OAUTH_CLIENT_SECRET` and any other secrets should be injected at runtime via `--env-file` or your orchestrator's secret management — never baked into the image.
+</Note>
