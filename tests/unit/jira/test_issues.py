@@ -1778,3 +1778,79 @@ class TestIssuesMixin:
 
         result = issues_mixin.get_issue("SAFE-1")
         assert result is not None
+
+    def test_get_issue_all_fields_returns_custom_fields(
+        self, issues_mixin: IssuesMixin, make_issue_data
+    ):
+        """fields='*all' sends '*all' to the Jira API and returns custom fields (TOR-01-BJ2CyHG).
+
+        The root-cause fix: the *all branch must pass the sentinel to the API,
+        not expand it into the default field list.
+        """
+        issues_mixin.jira.get_issue.return_value = make_issue_data(
+            issue_id="10001",
+            summary="Test issue",
+            customfield_10334={"value": "custom-value"},
+        )
+
+        issue = issues_mixin.get_issue("TEST-123", fields="*all", comment_limit=0)
+
+        # The underlying API must have been called with the *all sentinel —
+        # this is the assertion that pins the root-cause fix.
+        issues_mixin.jira.get_issue.assert_called_once_with(
+            "TEST-123",
+            expand=None,
+            fields="*all",
+            properties=None,
+            update_history=True,
+        )
+        simplified = issue.to_simplified_dict()
+        assert "summary" in simplified
+        assert "customfield_10334" in simplified
+        assert simplified["customfield_10334"] == {"value": "custom-value"}
+
+    def test_get_issue_all_fields_no_custom_fields_wellformed(
+        self, issues_mixin: IssuesMixin, make_issue_data
+    ):
+        """fields='*all' with only standard fields is well-formed (TOR-01-uzPp7yt)."""
+        issues_mixin.jira.get_issue.return_value = make_issue_data(
+            issue_id="10001",
+            summary="Standard only",
+        )
+
+        issue = issues_mixin.get_issue("TEST-123", fields="*all", comment_limit=0)
+
+        assert isinstance(issue, JiraIssue)
+        assert issue.key == "TEST-123"
+        assert issue.summary == "Standard only"
+        simplified = issue.to_simplified_dict()
+        assert "summary" in simplified
+
+    def test_get_issue_explicit_fields_unaffected_by_all_fix(
+        self, issues_mixin: IssuesMixin, make_issue_data
+    ):
+        """Explicit non-'*all' field lists pass through verbatim (TOR-01-9TP0naJ).
+
+        Regression guard: the *all fix must not touch the explicit-fields path.
+        """
+        issues_mixin.jira.get_issue.return_value = make_issue_data(
+            issue_id="10001",
+            summary="Explicit fields issue",
+            customfield_10334="cf-value",
+        )
+
+        issue = issues_mixin.get_issue(
+            "TEST-123",
+            fields="summary,status,customfield_10334",
+        )
+
+        issues_mixin.jira.get_issue.assert_called_once_with(
+            "TEST-123",
+            expand=None,
+            fields="summary,status,customfield_10334",
+            properties=None,
+            update_history=True,
+        )
+        simplified = issue.to_simplified_dict()
+        assert "summary" in simplified
+        assert "customfield_10334" in simplified
