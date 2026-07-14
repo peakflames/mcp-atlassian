@@ -213,12 +213,4 @@ DEFAULT_READ_JIRA_FIELDS: set[str] = {
     "created",
     "updated",
     "issuetype",
-    "issuelinks",
-    "subtasks",
-    "parent",
-    "components",
-    "fixVersions",
-    "attachment",
-    "resolution",
-    "resolutiondate",
 }

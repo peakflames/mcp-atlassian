@@ -13,10 +13,10 @@ class TestDefaultReadJiraFields:
         """Test that DEFAULT_READ_JIRA_FIELDS is a set of strings."""
         assert isinstance(DEFAULT_READ_JIRA_FIELDS, set)
         assert all(isinstance(field, str) for field in DEFAULT_READ_JIRA_FIELDS)
-        assert len(DEFAULT_READ_JIRA_FIELDS) == 18
+        assert len(DEFAULT_READ_JIRA_FIELDS) == 10
 
     def test_contains_expected_jira_fields(self):
-        """Test that DEFAULT_READ_JIRA_FIELDS contains all expected Jira fields."""
+        """Test that DEFAULT_READ_JIRA_FIELDS contains the correct Jira fields."""
         expected_fields = {
             "summary",
             "description",
@@ -28,14 +28,6 @@ class TestDefaultReadJiraFields:
             "created",
             "updated",
             "issuetype",
-            "issuelinks",
-            "subtasks",
-            "parent",
-            "components",
-            "fixVersions",
-            "attachment",
-            "resolution",
-            "resolutiondate",
         }
         assert DEFAULT_READ_JIRA_FIELDS == expected_fields
 
@@ -45,35 +37,9 @@ class TestDefaultReadJiraFields:
         assert essential_fields.issubset(DEFAULT_READ_JIRA_FIELDS)
 
     def test_field_format_validity(self):
-        """Test that field names are valid for API usage (no spaces, no surrounding underscores)."""
+        """Test that field names are valid for API usage."""
         for field in DEFAULT_READ_JIRA_FIELDS:
-            assert field
+            assert field and field.islower()
             assert " " not in field
             assert not field.startswith("_")
             assert not field.endswith("_")
-
-    def test_default_read_jira_fields_includes_relationship_and_resolution_fields(self):
-        """Expanded default set covers relationship and resolution fields (TOR-01-el7Cazx)."""
-        relationship_fields = {"issuelinks", "subtasks", "parent", "components"}
-        resolution_fields = {
-            "fixVersions",
-            "attachment",
-            "resolution",
-            "resolutiondate",
-        }
-        assert relationship_fields.issubset(DEFAULT_READ_JIRA_FIELDS)
-        assert resolution_fields.issubset(DEFAULT_READ_JIRA_FIELDS)
-        # Original 10 fields are still present
-        original_fields = {
-            "summary",
-            "description",
-            "status",
-            "assignee",
-            "reporter",
-            "labels",
-            "priority",
-            "created",
-            "updated",
-            "issuetype",
-        }
-        assert original_fields.issubset(DEFAULT_READ_JIRA_FIELDS)
