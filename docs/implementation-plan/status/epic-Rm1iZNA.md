@@ -1,5 +1,5 @@
-status: Implemented
+status: Complete
 implemented: 2026-07-14
-completed: —
-handoff: docs/implementation-plan/session-handoffs/epic-Rm1iZNA-implemented.md
+completed: 2026-07-14
+handoff: session-handoffs/epic-Rm1iZNA-complete.md
 requirements: TOR-01-twYUvG9, TOR-01-sa52UmE
