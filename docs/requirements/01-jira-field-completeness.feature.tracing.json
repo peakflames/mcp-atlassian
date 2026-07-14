@@ -1,0 +1,104 @@
+{
+  "feature_id": "01",
+  "feature_file": "01-jira-field-completeness.feature.md",
+  "generated": "2026-07-14",
+  "generator": "haiku-sub-agent via /peak-workflow:capture-requirements",
+  "requirements": [
+    {
+      "id": "TOR-01-BJ2CyHG",
+      "title": "The jira_get_issue tool shall return every populated field, including custom fields, when called with fields='*all', rather than substituting the default field set",
+      "traces_to": {
+        "vision": [
+          {
+            "section": "§5 — Goals & Success Criteria (MVP), Goal 1: Fix the `*all` formatter contract violation",
+            "paraphrase": "The `jira_get_issue` tool's documented behavior for `fields='*all'` must match its implementation — returning the complete field catalog including custom fields rather than silently falling back to a subset."
+          }
+        ],
+        "conops": [
+          {
+            "scenario": "S1",
+            "step": 5,
+            "paraphrase": "When a caller explicitly requests every field via `*all`, the method must separate its handling from the default-field path so custom fields are included in the response."
+          }
+        ]
+      }
+    },
+    {
+      "id": "TOR-01-9TP0naJ",
+      "title": "The jira_get_issue tool shall return exactly the fields named in an explicit, non-'*all' fields parameter, unaffected by the '*all'-handling fix",
+      "traces_to": {
+        "vision": [
+          {
+            "section": "§5 — Goals & Success Criteria (MVP), Cross-cutting Concerns: Surgical, minimal diffs",
+            "paraphrase": "The fix to the `*all` branch must not affect behavior for callers with explicit field names; the changes must be narrowly scoped to prevent unintended regressions."
+          }
+        ],
+        "conops": [
+          {
+            "scenario": "S1",
+            "step": 1,
+            "paraphrase": "When a caller requests specific named fields, the implementation must honor that request exactly, without interference from the `*all` fix logic."
+          }
+        ]
+      }
+    },
+    {
+      "id": "TOR-01-uzPp7yt",
+      "title": "The jira_get_issue tool shall return a well-formed '*all' response, with no error, for an issue with no populated custom fields beyond the standard set",
+      "traces_to": {
+        "vision": [
+          {
+            "section": "§5 — Goals & Success Criteria (MVP), Cross-cutting Concerns: Backward compatible by default",
+            "paraphrase": "The `*all` fix must handle issues with no custom fields gracefully, ensuring that existing callers using `*all` on simple issues continue to work without errors."
+          }
+        ],
+        "conops": [
+          {
+            "scenario": "S1",
+            "step": 5,
+            "paraphrase": "The fixed method must handle edge cases where no custom fields exist, returning a valid response that preserves the contract of the documented behavior."
+          }
+        ]
+      }
+    },
+    {
+      "id": "TOR-01-twYUvG9",
+      "title": "The jira_get_issue tool shall exclude custom fields whose value is null or an empty list from '*all' responses, so that LLM context is not flooded with empty field entries on instances with many defined custom fields",
+      "traces_to": {
+        "vision": [
+          {
+            "section": "§5 — Goals & Success Criteria (MVP), Goal 2: Filter null custom fields from `*all` responses",
+            "paraphrase": "When `*all` is used, only custom fields with populated values should appear in the response, preventing null entries from consuming LLM context on instances with thousands of defined custom fields."
+          }
+        ],
+        "conops": [
+          {
+            "scenario": "S1",
+            "step": 6,
+            "paraphrase": "After the Jira REST API returns all fields including nulls, the response processing must filter out custom fields with null or empty-list values before they reach the LLM context."
+          }
+        ]
+      }
+    },
+    {
+      "id": "TOR-01-sa52UmE",
+      "title": "DEFAULT_READ_JIRA_FIELDS shall contain exactly the 10 essential fields from the upstream sooperset/mcp-atlassian project, with no additional fields, ensuring default responses remain aligned with the upstream contract",
+      "traces_to": {
+        "vision": [
+          {
+            "section": "§5 — Goals & Success Criteria (MVP), Goal 3: Align default field set with upstream",
+            "paraphrase": "The default field set must remain at the upstream's 10-field 'essential only' alignment; callers needing relationship or custom field data should use explicit field parameters rather than rely on a default expansion."
+          }
+        ],
+        "conops": [
+          {
+            "scenario": "S2",
+            "step": 2,
+            "paraphrase": "The recommended pattern for an LLM assistant that needs relationship data is to use `jira_search_fields` to discover field IDs first, then request them explicitly via the fields parameter, keeping the default set lightweight and predictable."
+          }
+        ]
+      }
+    }
+  ],
+  "coverage_gaps": []
+}

@@ -20,6 +20,7 @@ from typing import Any, Optional
 import keyring
 import requests
 
+from ..exceptions import MCPAtlassianAuthenticationError
 from .urls import is_atlassian_cloud_url
 
 # Configure logging
@@ -238,6 +239,9 @@ class OAuthConfig:
                     "Check accessible resources."
                 )
             return True
+        except MCPAtlassianAuthenticationError as e:
+            logger.error(str(e))
+            return False
         except requests.exceptions.RequestException as e:
             logger.error(f"Network error during token exchange: {e}", exc_info=True)
             return False
@@ -309,6 +313,10 @@ class OAuthConfig:
         This method queries the accessible resources endpoint to get the cloud ID.
         The cloud ID is needed for API calls with Cloud OAuth.
         Data Center does not use cloud IDs.
+
+        Raises:
+            MCPAtlassianAuthenticationError: If a cloud ID is configured but the token
+                does not grant access to that site.
         """
         if self.is_data_center:
             return
@@ -317,20 +325,47 @@ class OAuthConfig:
             logger.debug("No access token available to get cloud ID")
             return
 
+        # Capture configured id before resolution may overwrite it.
+        configured_id = self.cloud_id
+
         try:
             headers = {"Authorization": f"Bearer {self.access_token}"}
             response = requests.get(CLOUD_ID_URL, headers=headers, timeout=HTTP_TIMEOUT)
             response.raise_for_status()
 
             resources = response.json()
-            if resources and len(resources) > 0:
-                # Use the first cloud site (most users have only one)
-                self.cloud_id = resources[0]["id"]
-                logger.debug(f"Found cloud ID: {self.cloud_id}")
-            else:
+            if not resources:
                 logger.warning("No Atlassian sites found in the response")
+                return
         except Exception as e:
             logger.error(f"Failed to get cloud ID: {e}")
+            return
+
+        # Validation: reject the token when it doesn't cover the configured site.
+        if configured_id:
+            accessible_ids = {r["id"] for r in resources}
+            if configured_id not in accessible_ids:
+                actual_sites = ", ".join(
+                    f'"{r.get("name", r["id"])}" ({r["id"]})' for r in resources
+                )
+                raise MCPAtlassianAuthenticationError(
+                    f"OAuth authorization failed: the authorized account can access "
+                    f"{actual_sites}, but the configured ATLASSIAN_OAUTH_CLOUD_ID "
+                    f'requires site "{configured_id}". '
+                    f"Re-run setup and sign in with an account that has access to the "
+                    f"required site."
+                )
+
+        # Resolution: sole resource → its id; configured id present → configured id;
+        # else → first resource id (preserves single-instance behavior).
+        if len(resources) == 1:
+            self.cloud_id = resources[0]["id"]
+        elif configured_id:
+            self.cloud_id = configured_id
+        else:
+            self.cloud_id = resources[0]["id"]
+
+        logger.debug(f"Found cloud ID: {self.cloud_id}")
 
     def _get_keyring_username(self) -> str:
         """Get the keyring username for storing tokens.
