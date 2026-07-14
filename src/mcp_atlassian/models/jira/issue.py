@@ -624,6 +624,10 @@ class JiraIssue(ApiModel, TimestampMixin):
                     processed_value = self._process_custom_field_value(
                         field_data_obj.get("value")
                     )
+                    if processed_value is None or (
+                        isinstance(processed_value, list) and not processed_value
+                    ):
+                        continue
                     output_value_obj = {"value": processed_value}
                     if "name" in field_data_obj:
                         output_value_obj["name"] = field_data_obj["name"]

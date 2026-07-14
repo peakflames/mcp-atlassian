@@ -984,6 +984,26 @@ class TestIssuesMixin:
         assert "description" in simplified
         assert "customfield_10049" in simplified
 
+    def test_get_issue_all_fields_excludes_null_custom_fields(
+        self, issues_mixin: IssuesMixin, make_issue_data
+    ):
+        """[TOR-01-twYUvG9] *all responses omit null and empty-list custom fields."""
+        issues_mixin.jira.get_issue.return_value = make_issue_data(
+            issue_id="10001",
+            summary="Test issue",
+            customfield_10334=None,
+            customfield_10335=[],
+            customfield_10336="populated",
+        )
+
+        issue = issues_mixin.get_issue("TEST-123", fields="*all")
+        simplified = issue.to_simplified_dict()
+
+        assert "customfield_10334" not in simplified
+        assert "customfield_10335" not in simplified
+        assert "customfield_10336" in simplified
+        assert simplified["customfield_10336"] == {"value": "populated"}
+
     def test_get_issue_with_properties(
         self, issues_mixin: IssuesMixin, make_issue_data
     ):
