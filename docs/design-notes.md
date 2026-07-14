@@ -1,5 +1,9 @@
 # Design Notes
 
+> **Last refreshed:** 2026-07-14  
+> **Basis:** Epics XG1cmts + Rm1iZNA handoffs  
+> **Audience:** Developers, contributors, maintainers
+
 ## Overview
 
 This document records key architectural decisions, rationale, and tradeoffs made during the implementation of MCP Atlassian.
@@ -17,8 +21,6 @@ This document records key architectural decisions, rationale, and tradeoffs made
 - **Testing**: Mixins can be unit-tested in isolation by creating test clients that compose only the relevant mixins.
 
 **Trade-off**: Transitive inheritance can obscure method resolution order (MRO) for complex inheritance chains. Mitigated by explicit protocol definitions (`protocols.py`) that document the expected interface.
-
-**Evidence**: Epic XG1cmts handoff — all 18 field-related constants and behaviors are isolated in `jira/constants.py` and `jira/issues.py`, with clear test boundaries in `tests/unit/jira/test_constants.py` and `tests/unit/jira/test_issues.py`.
 
 ---
 
@@ -48,36 +50,53 @@ This document records key architectural decisions, rationale, and tradeoffs made
 - **Custom fields**: Many Jira instances have custom fields that are not known in advance. Only the `*all` sentinel guarantees they will be included.
 - **Simplicity**: No field enumeration logic needed in the tool layer; Jira handles it.
 
-**Trade-off**: The response may be large and slow to parse. Mitigated by optional response filtering in preprocessing and encouraging default field requests for most use cases.
+**Trade-off**: The response may be large and slow to parse. Mitigated by the null-filter (Decision #4) and optional response filtering in preprocessing.
 
-**Evidence**: Epic XG1cmts handoff — fixed `jira_get_issue` to pass `["*all"]` directly (lines 104–110 in `src/mcp_atlassian/jira/issues.py`). Tests verify this behavior in `tests/unit/jira/test_issues.py:1800`.
+**Evidence**: Epic XG1cmts handoff — fixed `jira_get_issue` to pass `["*all"]` directly. Tests verify this behavior in `tests/unit/jira/test_issues.py`.
 
 ---
 
-### 4. DEFAULT_READ_JIRA_FIELDS as a Curated Set
+### 4. Scoped Null Filter for `*all` Responses
 
-**Decision**: Maintain a `DEFAULT_READ_JIRA_FIELDS` constant (18 fields) that covers the most commonly needed fields and is used as the default when no explicit fields are requested.
+**Decision**: When `requested_fields == "*all"`, custom fields with null or empty-list values are **excluded** from `to_simplified_dict()` output. Explicitly-requested fields always return their value, including null.
 
 **Rationale**:
-- **Performance**: Reduces response size and parsing time for typical queries (issues, search, board items).
-- **Discoverability**: Explicit set makes it clear what fields an LLM will receive by default.
-- **Relationship coverage**: Includes relationship fields (`issuelinks`, `subtasks`, `parent`) and resolution fields (`resolution`, `resolutiondate`) that are essential for understanding issue context.
-- **Consistency**: All callers (`jira_get_issue`, `jira_search`, `jira_get_board_issues`) inherit the same default set.
+- Jira instances with 2000+ defined custom fields (like Archer) return massive responses with mostly null values when `*all` is used. Including these nulls floods the LLM context window without adding information.
+- Callers who explicitly request a specific field by name still receive null values, preserving the documented contract: "when you ask for a specific field, you get it."
 
-**Trade-off**: If a field is not in the default set and the user doesn't request it explicitly, it will not be returned. Mitigated by documenting the default set and allowing `fields='*all'` override.
+**Implementation** — `src/mcp_atlassian/models/jira/issue.py:627–630`:
 
-**Composition** (18 fields):
-- Core: `summary`, `description`, `status`, `issuetype`, `priority`, `created`, `updated`
-- People: `assignee`, `reporter`
-- Relationships: `issuelinks`, `subtasks`, `parent`, `components`, `labels`
-- Versions: `fixVersions`, `attachment`
-- Resolution: `resolution`, `resolutiondate`
+```python
+if self.requested_fields == "*all":
+    for internal_id, field_data_obj in self.custom_fields.items():
+        processed_value = self._process_custom_field_value(field_data_obj.get("value"))
+        if processed_value is None or (isinstance(processed_value, list) and not processed_value):
+            continue  # skip null and empty-list fields
+        result[internal_id] = {"value": processed_value}
+elif isinstance(self.requested_fields, list):
+    # explicit field requests include null values
+```
 
-**Evidence**: Epic XG1cmts handoff — expanded from 10 to 18 fields. Tests verify count in `tests/unit/jira/test_constants.py:55`.
+**Evidence**: Epic Rm1iZNA handoff — TOR-01-twYUvG9 regression guard at `tests/unit/jira/test_issues.py::TestIssuesMixin::test_get_issue_all_fields_excludes_null_custom_fields`.
 
 ---
 
-### 5. Configuration via Environment Variables and Dataclasses
+### 5. DEFAULT_READ_JIRA_FIELDS as a Curated 10-Field Set
+
+**Decision**: Maintain a `DEFAULT_READ_JIRA_FIELDS` constant with exactly 10 fields, aligned with the upstream sooperset/mcp-atlassian project.
+
+**Rationale**:
+- **Performance**: Reduces response size and parsing time for typical queries.
+- **Upstream alignment**: Matches the upstream project's contract; callers needing relationship or custom field data use `jira_search_fields` to discover field IDs and pass them explicitly.
+- **Discoverability**: Explicit minimal set makes it clear what fields an LLM receives by default.
+
+**Fields (10):** `summary`, `description`, `status`, `assignee`, `reporter`, `labels`, `priority`, `created`, `updated`, `issuetype`
+
+**Evidence**: `tests/unit/jira/test_constants.py::TestDefaultReadJiraFields` — 4 tests confirm the set is exactly these 10 fields, length 10, no extras.
+
+---
+
+### 6. Configuration via Environment Variables and Dataclasses
 
 **Decision**: Use Pydantic dataclasses (`JiraConfig`, `ConfluenceConfig`) with a `from_env()` factory method to load all configuration from environment variables at startup.
 
@@ -87,13 +106,11 @@ This document records key architectural decisions, rationale, and tradeoffs made
 - **Type safety**: Dataclass type hints enable IDE autocomplete and mypy checking.
 - **Flexibility**: Supports multiple authentication methods (Basic, PAT, OAuth) via conditional field presence.
 
-**Trade-off**: Env vars are untyped strings until Pydantic parses them. Mitigated by comprehensive validation and `.env.example` documentation.
-
-**Evidence**: `src/mcp_atlassian/jira/config.py` and `src/mcp_atlassian/confluence/config.py` define configs with `from_env()` methods.
+**Evidence**: `src/mcp_atlassian/jira/config.py` and `src/mcp_atlassian/confluence/config.py`.
 
 ---
 
-### 6. Pydantic v2 for All Data Models
+### 7. Pydantic v2 for All Data Models
 
 **Decision**: Use Pydantic v2 (not v1) for all data models extending `ApiModel` base class with `from_api_response()` and `to_simplified_dict()` methods.
 
@@ -101,169 +118,113 @@ This document records key architectural decisions, rationale, and tradeoffs made
 - **Modern**: Pydantic v2 has better performance, validation composability, and JSON schema support.
 - **Consistency**: All models use the same serialization/deserialization pattern.
 - **LLM-friendly**: The `to_simplified_dict()` method strips internal fields and complex nested structures, producing clean dicts for LLM consumption.
-- **Field documentation**: Pydantic's `Field()` allows per-field documentation that aids debugging and LLM context.
-
-**Trade-off**: v2 has breaking changes from v1. Mitigated by managing dependencies carefully and using comprehensive type hints.
 
 **Evidence**: All models in `src/mcp_atlassian/models/` extend `ApiModel` and implement both factory methods.
 
 ---
 
-### 7. TTLCache for Short-Lived Response Caching
+### 8. TTLCache for Short-Lived Response Caching
 
 **Decision**: Implement response caching via TTLCache (from cachetools) with a configurable TTL (default 5 minutes) in the `CachingMixin`.
 
 **Rationale**:
-- **Reduce API calls**: Repeated queries within the TTL window reuse cached responses, reducing Jira/Confluence API load and improving latency.
-- **Cost savings**: Fewer API calls → lower API token usage and quota.
-- **Stale tolerance**: 5-minute default TTL balances freshness with cache hit rate for most workflows.
+- **Reduce API calls**: Repeated queries within the TTL window reuse cached responses, reducing Atlassian API load.
 - **Configurable**: TTL can be adjusted via env var (`JIRA_CACHE_TTL_SECONDS`, etc.) for different use cases.
 
-**Trade-off**: Cached data can be stale. For real-time consistency, the user can disable caching or use a short TTL.
-
-**Implementation**: Cache key is derived from method name + arguments (e.g., `get_issue(PROJECT-123)` → `get_issue|PROJECT-123`).
-
-**Evidence**: `src/mcp_atlassian/jira/` mixins integrate with `CachingMixin` via inheritance.
+**Cache key**: Method name + arguments (e.g., `get_issue(PROJECT-123)` → `get_issue|PROJECT-123`).
 
 ---
 
-### 8. Content Conversion: ADF → Markdown, Storage XML → Markdown
+### 9. Content Conversion: ADF → Markdown, Storage XML → Markdown
 
 **Decision**: Convert Atlassian Document Format (ADF) and Confluence Storage XML to Markdown for LLM readability.
 
 **Rationale**:
 - **Clarity**: Markdown is human-readable and widely understood by LLMs.
-- **Consistency**: Both Jira (ADF) and Confluence (Storage XML) are converted to the same format, simplifying downstream processing.
-- **Compatibility**: Markdown is a standard, stable format unlikely to change.
+- **Consistency**: Both Jira (ADF) and Confluence (Storage XML) are converted to the same format.
 
-**Trade-off**: Conversion can lose fidelity for complex ADF structures (embedded macros, custom formatting). Mitigated by preserving structure where possible and documenting limitations.
-
-**Implementation**: Uses `markdownify` library for HTML-to-Markdown conversion after ADF/Storage XML is parsed.
+**Trade-off**: Conversion can lose fidelity for complex ADF structures (embedded macros, custom formatting).
 
 **Evidence**: `src/mcp_atlassian/preprocessing/jira.py` and `src/mcp_atlassian/preprocessing/confluence.py`.
 
 ---
 
-### 9. Project-Level Access Control
+### 10. Project-Level Access Control
 
 **Decision**: Implement access control at the project level with two modes: whitelist (allow specific projects) and blocklist (block or mark specific projects as read-only).
 
 **Rationale**:
-- **Multi-tenant safety**: When a single MCP server instance serves multiple tenants or users, project filtering prevents cross-tenant data leakage.
-- **Flexibility**: Whitelist mode is safe by default (deny all, allow specific); blocklist mode is permissive (allow all, restrict specific).
+- **Multi-tenant safety**: Prevents cross-tenant data leakage when a single MCP server instance serves multiple users.
 - **Early validation**: Access checks run **before** API calls, preventing unnecessary Atlassian API calls to unauthorized projects.
 
-**Trade-off**: Filtering is project-specific; cross-project queries (e.g., via JQL) are not automatically filtered. Mitigated by documenting the limitation and relying on Jira/Confluence permissions as the primary control.
-
-**Implementation**: `utils/access_control.py` provides `check_jira_project_access()` function called in issue-related tools.
-
-**Evidence**: `src/mcp_atlassian/jira/issues.py:88–90` checks access before calling API.
+**Implementation**: `utils/access_control.py` provides `check_jira_project_access()` called in issue-related tools.
 
 ---
 
-### 10. Read-Only Mode at Server Level
+### 11. Read-Only Mode at Server Level
 
 **Decision**: Implement a global `READ_ONLY_MODE` flag that blocks all write tools before they execute.
 
 **Rationale**:
 - **Safety**: Prevents accidental mutations in read-only environments (e.g., demos, audits, non-prod).
 - **Simplicity**: Single flag controls all write operations without per-tool configuration.
-- **Fail-fast**: Tools that attempt writes raise an error immediately, providing clear feedback.
-
-**Trade-off**: All write tools must be wrapped in the same check, requiring discipline. Mitigated by centralizing the check in `servers/main.py` lifespan hook.
-
-**Evidence**: Read-only mode blocks all write tool schemas at server startup if `READ_ONLY_MODE=true`.
 
 ---
 
-## Known Issues and Deferred Work
+## Known Issues
 
-### Pre-existing Issues
+### Pre-existing Issues (not introduced by recent epics)
 
-1. **TTLCache type argument warning** (`servers/main.py:363`):
-   - `TTLCache` is instantiated with 2 type arguments but expects 3.
-   - **Fix**: Add `float` as the third type argument or suppress with `# type: ignore[type-arg]`.
-   - **Priority**: Low (does not affect runtime behavior).
-
-2. **Weak test assertions in test_search.py**:
-   - `test_search.py:1323, :1363` contain `or True` guards that render secondary sub-assertions permanently passing.
-   - **Fix**: Remove the `or True` guards and ensure assertions are meaningful.
-   - **Priority**: Low (primary assertions are correct; this is a test quality issue).
+- **Unreachable code warning:** `issue.py:260` — mypy reports `Statement is unreachable [unreachable]` (no behavior impact, low priority)
+- **Windows path test failure:** `tests/unit/jira/test_attachments.py` — `/tmp/` vs `C:\tmp\` mismatch on Windows runners (isolated to attachment test)
+- **TTLCache type argument warning:** `servers/main.py` — `TTLCache` instantiated with 2 type arguments where 3 are expected (no runtime impact)
+- **Weak test assertions:** `test_search.py` — some secondary sub-assertions use `or True` guards, rendering them always-passing (primary assertions are correct)
 
 ### Deferred Work
 
-1. **Upstream contribution**:
-   - File upstream issues against `sooperset/mcp-atlassian` for:
-     - The `*all` field sentinel bug (missing in older versions).
-     - The missing default fields (field expansion incomplete).
-   - Create `contrib/` branch off `upstream/main` and open a PR.
-   - **Requires**: `gh` CLI authentication to the upstream repo.
-   - **Status**: Not started.
-
-2. **Multi-tenant OAuth**:
-   - Epic 1SVldWi (Not Started) will implement multi-tenant OAuth support.
-   - Requires enhanced session storage and tenant-aware token refresh.
-
-3. **Additional field expansion**:
-   - As more features are built, additional fields (e.g., `securityLevel`, `customfield_*`) may be added to `DEFAULT_READ_JIRA_FIELDS`.
-   - Should be done judiciously to avoid bloating default responses.
+- **Upstream contribution:** File upstream issues against `sooperset/mcp-atlassian` for the `*all` field sentinel fix and null-filter. Create `contrib/` branch off `upstream/main`.
+- **Multi-tenant OAuth:** Epic 1SVldWi (Not Started) — requires enhanced session storage and tenant-aware token refresh.
 
 ---
 
-## Architecture Principles
+## Testing Strategy
 
-### 1. Single Responsibility
+**Unit tests** (fast, isolated):
+- Model serialization (`to_simplified_dict()` output)
+- Field filtering logic (null/empty-list exclusion in `*all` mode)
+- Field constant verification (exact 10-field set)
 
-Each mixin, model, and utility module handles one domain. This makes tests focused and code changes localized.
+**Integration tests** (require real Jira/Confluence):
+- End-to-end OAuth flow
+- Per-tenant client isolation
+- API compatibility (Cloud vs Server/DC)
 
-### 2. Configuration Over Convention
+**Pre-commit hooks:**
+- Ruff linting (88-char line length)
+- mypy type checking (strict mode on `src/`, relaxed on `tests/`)
+- Import sorting
 
-Settings are explicit (env vars, dataclass fields) rather than implicit. This reduces surprises and aids debugging.
+---
 
-### 3. Type Safety
+## Architectural Invariants
 
-All functions have type hints. Mypy runs in strict mode in CI/pre-commit. This catches errors early and aids IDE support.
-
-### 4. Fail Fast
-
-Validation and access checks run early (at config load and before API calls). Invalid configs are rejected at startup, not at runtime.
-
-### 5. Async Throughout
-
-All I/O operations use async/await. The Trio event loop manages concurrency, allowing multiple tools to run concurrently within the server.
-
-### 6. LLM-Focused Simplification
-
-Models' `to_simplified_dict()` methods remove internal fields and flatten deeply nested structures. This produces clean, readable dicts for LLM consumption.
+1. **Null filtering is read-only:** `to_simplified_dict()` filters; request handling does not mutate API response payloads.
+2. **Explicit requests bypass filtering:** If a caller asks for a specific field, they get its value, even if null.
+3. **Cloud and Server/DC branches are stable:** Code uses `is_cloud` to partition logic; both paths are tested.
+4. **Tool naming is consistent:** `{service}_{action}_{target}` pattern held across all tools.
+5. **Models are immutable in transit:** Pydantic models are frozen at the API boundary; no in-flight mutation.
 
 ---
 
 ## Future Considerations
 
-### OAuth 2.0 Multi-Tenant
+1. **Performance optimization:** Cache field definitions per instance to reduce descriptor API calls.
+2. **Rate limit handling:** Backoff strategy for high-volume search and bulk operations.
+3. **Workspace federation:** Support for Jira Service Management, Portfolio, and Automation Server.
+4. **Extended content preprocessing:** Preserve embedded images, handle complex macros with fallback text.
+5. **Real-time sync:** Stream issue and page updates via webhooks.
 
-As multi-tenant OAuth is implemented (Epic 1SVldWi), additional consideration is needed for:
-- Token refresh and expiration handling
-- Session isolation between tenants
-- Secure storage of refresh tokens
+---
 
-### Rate Limiting and Quota Management
-
-The server does not currently implement rate-limit tracking or quota management. Future enhancements could:
-- Track remaining API calls via Atlassian headers
-- Implement backoff strategies when rate limits are approached
-- Expose quota metrics in health-check endpoints
-
-### Extended Content Preprocessing
-
-Current preprocessing handles ADF and Storage XML. Future enhancements could:
-- Preserve embedded images and attachments as URLs
-- Handle complex macros with fallback text
-- Implement custom rendering for Jira Forms (proforma questionnaires)
-
-### Real-Time Sync
-
-The server is currently synchronous (request-response). Future enhancements could:
-- Stream issue and page updates via webhooks
-- Implement subscriptions for real-time field updates
-- Add change notification aggregation
+*Last reviewed: 2026-07-14 (Epic Rm1iZNA completion)*  
+*Next review: After Epic 1SVldWi completion (TOR-02 Multi-Instance OAuth)*
