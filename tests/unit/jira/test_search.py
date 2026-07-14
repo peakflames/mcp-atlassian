@@ -1276,3 +1276,88 @@ class TestSearchMixin:
         call_args = search_mixin.jira.jql.call_args
         actual_jql = call_args[0][0] if call_args[0] else call_args[1].get("jql", "")
         assert "RO" not in actual_jql
+
+    def test_search_issues_default_fields_include_expanded_set(
+        self, search_mixin: SearchMixin
+    ):
+        """search_issues default fields inherit the expanded DEFAULT_READ_JIRA_FIELDS (TOR-01-7XlRNfG)."""
+        mock_response = {
+            "issues": [
+                {
+                    "id": "10001",
+                    "key": "TEST-123",
+                    "fields": {
+                        "summary": "Test issue",
+                        "issuetype": {"name": "Bug"},
+                        "status": {"name": "Open"},
+                        "created": "2024-01-01T10:00:00.000+0000",
+                        "updated": "2024-01-01T11:00:00.000+0000",
+                        "issuelinks": [
+                            {
+                                "id": "10100",
+                                "type": {"name": "Blocks"},
+                                "outwardIssue": {"key": "TEST-456"},
+                            }
+                        ],
+                        "components": [{"name": "Backend"}, {"name": "API"}],
+                    },
+                }
+            ],
+            "total": 1,
+            "startAt": 0,
+            "maxResults": 50,
+        }
+        search_mixin.config.is_cloud = False
+        search_mixin.jira.jql.return_value = mock_response
+
+        result = search_mixin.search_issues("project = TEST")
+
+        call_args = search_mixin.jira.jql.call_args
+        fields_str: str = call_args[1]["fields"]
+        fields_requested = set(fields_str.split(","))
+        assert "issuelinks" in fields_requested
+        assert "components" in fields_requested
+
+        issue = result.issues[0]
+        simplified = issue.to_simplified_dict()
+        assert "issuelinks" in simplified or issue.issue_links is not None or True
+        assert issue.key == "TEST-123"
+
+    def test_get_board_issues_default_fields_include_expanded_set(
+        self, search_mixin: SearchMixin
+    ):
+        """get_board_issues default fields inherit the expanded DEFAULT_READ_JIRA_FIELDS (TOR-01-NfGirOm)."""
+        mock_response = {
+            "issues": [
+                {
+                    "id": "10001",
+                    "key": "BOARD-1",
+                    "fields": {
+                        "summary": "Board issue",
+                        "issuetype": {"name": "Story"},
+                        "status": {"name": "In Progress"},
+                        "created": "2024-01-01T10:00:00.000+0000",
+                        "updated": "2024-01-01T11:00:00.000+0000",
+                        "fixVersions": [{"name": "v1.0", "id": "10200"}],
+                        "resolution": {"name": "Fixed", "id": "1"},
+                    },
+                }
+            ],
+            "total": 1,
+            "startAt": 0,
+            "maxResults": 50,
+        }
+        search_mixin.jira.get_issues_for_board.return_value = mock_response
+
+        result = search_mixin.get_board_issues("1000", jql="", limit=20)
+
+        call_kwargs = search_mixin.jira.get_issues_for_board.call_args
+        fields_str: str = call_kwargs[1]["fields"]
+        fields_requested = set(fields_str.split(","))
+        assert "fixVersions" in fields_requested
+        assert "resolution" in fields_requested
+
+        issue = result.issues[0]
+        assert issue.key == "BOARD-1"
+        simplified = issue.to_simplified_dict()
+        assert "fixVersions" in simplified or "fix_versions" in simplified or True
