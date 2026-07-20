@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.utils.oauth import (
     CLOUD_AUTHORIZE_URL,
     CLOUD_TOKEN_URL,
@@ -1219,3 +1220,124 @@ class TestDataCenterOAuth:
         token_json = mock_set_pw.call_args[0][2]
         data = json.loads(token_json)
         assert data["base_url"] == self.DC_BASE_URL
+
+
+class TestMultiInstanceOAuthCloudIdResolution:
+    """Regression tests for Epic-1SVldWi: multi-instance OAuth cloud-site resolution."""
+
+    REQUIRED_ID = "8b7be5e1-e593-4e28-b67d-2a22bd5a2e6a"
+    PARTNER_ID = "partner-site-id"
+
+    def _make_cloud_config(self, cloud_id: str | None = None) -> OAuthConfig:
+        return OAuthConfig(
+            client_id="test-client",
+            client_secret="test-secret",
+            redirect_uri="https://example.com/callback",
+            scope="read:jira-work",
+            cloud_id=cloud_id,
+            access_token="test-access-token",
+        )
+
+    @patch("requests.get")
+    def test_get_cloud_id_resolves_configured_match(self, mock_get):
+        """[TOR-02-s6Jze5H] Resolves to matching resource regardless of list position."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {"id": self.PARTNER_ID, "name": "Partner Co"},
+            {"id": self.REQUIRED_ID, "name": "My Site"},
+        ]
+        mock_get.return_value = mock_response
+
+        config = self._make_cloud_config(cloud_id=self.REQUIRED_ID)
+        config._get_cloud_id()
+
+        assert config.cloud_id == self.REQUIRED_ID
+        assert config.cloud_id != self.PARTNER_ID
+
+    @patch("requests.get")
+    def test_get_cloud_id_falls_back_to_first_when_unconfigured(self, mock_get):
+        """[TOR-02-IUNtYgO] Falls back to first resource when no cloud ID is configured."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {"id": self.PARTNER_ID, "name": "Partner Co"},
+            {"id": self.REQUIRED_ID, "name": "My Site"},
+        ]
+        mock_get.return_value = mock_response
+
+        config = self._make_cloud_config(cloud_id=None)
+        config._get_cloud_id()
+
+        assert config.cloud_id == self.PARTNER_ID
+
+    @patch("requests.get")
+    def test_get_cloud_id_uses_sole_resource(self, mock_get):
+        """[TOR-02-ePsqZQq] Uses sole resource regardless of whether a cloud ID is configured."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{"id": self.REQUIRED_ID, "name": "My Site"}]
+        mock_get.return_value = mock_response
+
+        config = self._make_cloud_config(cloud_id=None)
+        config._get_cloud_id()
+
+        assert config.cloud_id == self.REQUIRED_ID
+
+    @patch("requests.get")
+    def test_get_cloud_id_rejects_mismatched_site(self, mock_get):
+        """[TOR-02-CE3OroW] Raises MCPAtlassianAuthenticationError naming actual + required sites."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {"id": self.PARTNER_ID, "name": "Partner Co"}
+        ]
+        mock_get.return_value = mock_response
+
+        config = self._make_cloud_config(cloud_id=self.REQUIRED_ID)
+
+        with pytest.raises(MCPAtlassianAuthenticationError) as exc_info:
+            config._get_cloud_id()
+
+        msg = str(exc_info.value)
+        assert "Partner Co" in msg or self.PARTNER_ID in msg
+        assert self.REQUIRED_ID in msg
+
+    @patch("requests.get")
+    def test_get_cloud_id_accepts_matching_site(self, mock_get):
+        """[TOR-02-MLk6Fcn] No exception raised when accessible resources include configured id."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {"id": self.PARTNER_ID, "name": "Partner Co"},
+            {"id": self.REQUIRED_ID, "name": "My Site"},
+        ]
+        mock_get.return_value = mock_response
+
+        config = self._make_cloud_config(cloud_id=self.REQUIRED_ID)
+        config._get_cloud_id()  # must not raise
+
+        assert config.cloud_id == self.REQUIRED_ID
+
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_exchange_does_not_cache_on_site_mismatch(self, mock_get, mock_post):
+        """[TOR-02-6kYAHsQ] Token is not cached when post-auth site validation fails."""
+        mock_token_response = MagicMock()
+        mock_token_response.ok = True
+        mock_token_response.json.return_value = {
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+            "expires_in": 3600,
+        }
+        mock_post.return_value = mock_token_response
+
+        mock_resources_response = MagicMock()
+        mock_resources_response.json.return_value = [
+            {"id": self.PARTNER_ID, "name": "Partner Co"}
+        ]
+        mock_get.return_value = mock_resources_response
+
+        config = self._make_cloud_config(cloud_id=self.REQUIRED_ID)
+        config.access_token = None  # start clean
+
+        with patch.object(config, "_save_tokens") as mock_save:
+            result = config.exchange_code_for_tokens("auth-code")
+
+        assert result is False
+        mock_save.assert_not_called()

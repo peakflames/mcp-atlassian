@@ -1,0 +1,49 @@
+# Discovery Changelog
+
+**Date:** 2026-07-13
+**Mode:** Brownfield (post-MVP scope revision following maintainer feedback)
+**Previous Version:** v1.0 (2026-07-08)
+
+## Context
+
+After Epic XG1cmts was implemented (PR #3 open, awaiting review), the upstream `sooperset/mcp-atlassian` maintainer raised a token-usage concern about the expanded `DEFAULT_READ_JIRA_FIELDS`. Independently, a code investigation identified a null-filtering bug in the `*all` response path that makes `fields='*all'` actively harmful on Jira instances with many defined custom fields (Archer has 2000+). This session revised the product vision to address both issues before PR #3 merges.
+
+## What Changed
+
+| Document | Section | Change Type | Summary |
+|----------|---------|-------------|---------|
+| product-vision.md | Header | Modified | Version bump 1.0 → 2.0, date 2026-07-08 → 2026-07-13 |
+| product-vision.md | §2 Problem Statement | Modified | Replaced "default field set omits 8 fields" bullet with null-filtering problem; added upstream-alignment rationale |
+| product-vision.md | §5 Goals | Modified | Removed "expand default field set to 18" goal; replaced with two goals: null-safe `*all` + upstream-aligned defaults |
+| product-vision.md | §6 MVP Scope | Modified | Removed expansion of DEFAULT_READ_JIRA_FIELDS; added null-value filter; noted jira_search_fields as discovery mechanism |
+| product-vision.md | §8 Scenarios | Modified | Scenario 2 changed from "expanded default gives relationship data" to "LLM-driven field discovery via jira_search_fields" |
+| product-vision.md | §9 Design Direction | Modified | Added upstream-alignment and null-safe `*all` principles; added jira_search_fields recommendation |
+| concept-of-operations.md | Header | Modified | Version bump 1.0 → 2.0 |
+| concept-of-operations.md | §2 As-Is | Modified | Added null-filtering bug as a separate current-state limitation |
+| concept-of-operations.md | §3 To-Be | Modified | Updated to reflect revert to 10-field default and null-filter fix; removed 18-field expansion |
+| concept-of-operations.md | §5 Scenario 2 | Modified | Replaced "18-field default response" with "LLM-driven field discovery" scenario |
+| concept-of-operations.md | §6 Data flows | Modified | Updated field resolution flow to show null-filter step; added LLM-driven field selection pattern |
+| concept-of-operations.md | §7 Functional Summary | Modified | Removed "Expanded default JIRA fields" feature; replaced with null-safe `*all` and upstream-aligned defaults |
+| concept-of-operations.md | §9 Glossary | Added | Added `jira_search_fields` definition |
+
+## New Capabilities Identified
+
+- **Null-safe `*all` output:** Filter custom fields with null or empty-list values from `*all` responses before they reach LLM context. This makes `fields='*all'` usable on Archer's Jira instance (2000+ custom fields defined).
+- **LLM-driven field selection pattern:** Documented `jira_search_fields` → explicit `fields` parameter as the recommended pattern for relationship data — more token-efficient than broad defaults, and the tool already exists.
+
+## Priority Signal
+
+- **Highest priority (current branch, before PR #3 merges):**
+  1. Fix `*all` null filtering in `models/jira/issue.py:to_simplified_dict()` — correctness bug
+  2. Revert `DEFAULT_READ_JIRA_FIELDS` to 10 fields — aligns with upstream and maintainer feedback
+  3. Update tests to reflect both changes (TOR-01-el7Cazx, TOR-01-7XlRNfG, TOR-01-NfGirOm tests become invalid and must be replaced or removed)
+
+- **Medium priority (future epic or quick-fix after PR #3 merges):**
+  - Validate null-filter behavior on Archer's actual Jira instance — does `*all` now return a reasonable number of populated custom fields?
+  - Consider documenting the `jira_search_fields` → explicit fields pattern in the tool's description for improved LLM routing
+
+## Deferred Items
+
+- Adding `issuelinks`, `attachment`, or other relationship fields as separate on-demand tools (e.g., `jira_get_issue_links`) — discussed but not scoped
+- Exposing `*all` behavior as a documented, first-class feature with explicit guidance on token cost (from Product Vision §11 backlog)
+- Upstream contribution of the `*all` sentinel fix and null filter to `sooperset/mcp-atlassian`
