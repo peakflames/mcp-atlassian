@@ -1,230 +1,347 @@
 # Design Notes
 
-> **Last refreshed:** 2026-07-14  
-> **Basis:** Epics XG1cmts + Rm1iZNA handoffs  
-> **Audience:** Developers, contributors, maintainers
-
-## Overview
-
-This document records key architectural decisions, rationale, and tradeoffs made during the implementation of MCP Atlassian.
-
-## Design Decisions
-
-### 1. Mixin Composition Pattern for Client Classes
-
-**Decision**: Use Python mixin classes to organize Jira and Confluence client functionality into separate modules while maintaining a single cohesive client class through transitive inheritance.
-
-**Rationale**:
-- **Modularity**: Each mixin handles a specific domain (issues, search, fields, SLA, etc.), making the codebase easier to navigate and maintain.
-- **Single responsibility**: Each file (~300–500 LOC) focuses on one operational domain.
-- **Discoverability**: Developers can quickly find the method they need by looking at mixin names.
-- **Testing**: Mixins can be unit-tested in isolation by creating test clients that compose only the relevant mixins.
-
-**Trade-off**: Transitive inheritance can obscure method resolution order (MRO) for complex inheritance chains. Mitigated by explicit protocol definitions (`protocols.py`) that document the expected interface.
+Key architectural and design decisions made during implementation.
 
 ---
 
-### 2. FastMCP Server with Lifespan Dependency Injection
+## 1. Mixin-Based Client Composition
 
-**Decision**: Use FastMCP's lifespan container to instantiate `JiraFetcher` and `ConfluenceFetcher` once at startup, then inject via context into every tool handler.
+**Decision:** Organize fetcher functionality into domain-specific mixins (JiraIssuesMixin, JiraSearchMixin, etc.) rather than monolithic client classes.
 
-**Rationale**:
-- **Single instance**: Reduces memory footprint and allows session/cache state to be shared across tools within a single server process.
-- **Startup validation**: OAuth, connection parameters, and SSL certificates are validated once during lifespan, failing fast if config is invalid.
-- **Async-safe**: Lifespan runs in the event loop, ensuring all async initialization (OAuth token exchange, connection pooling) completes before tools are invoked.
-- **Context isolation**: Each request sees a clean dependency graph via `get_jira_fetcher(ctx)` and `get_confluence_fetcher(ctx)`, enabling easy mocking in tests.
+**Rationale:**
+- **Maintainability**: Related methods stay together (all issue operations in one mixin, all search operations in another)
+- **Reusability**: Mixins can be composed into different client types (e.g., read-only client without write mixins)
+- **Testability**: Each mixin can be unit tested independently
+- **Feature isolation**: Selective tool enablement via `utils/toolsets.py` is much simpler when methods are already grouped
 
-**Trade-off**: If a client becomes corrupted during execution, all tools fail until the server restarts. Mitigated by comprehensive error handling in each tool and health-check endpoints (if deployed as HTTP).
+**Trade-offs:**
+- Method lookup requires understanding mixin ordering (solved via IDE search + comprehensive docs)
+- Multiple inheritance adds cognitive load (mitigated by consistent naming and docstrings)
 
-**Evidence**: `src/mcp_atlassian/servers/main.py` lifespan hook instantiates clients; `src/mcp_atlassian/servers/dependencies.py` provides injection helpers.
-
----
-
-### 3. `*all` Sentinel Over Explicit Field Expansion
-
-**Decision**: When a user requests `fields='*all'`, pass the literal string `["*all"]` to the Jira API instead of expanding it into a list of known field names.
-
-**Rationale**:
-- **Future-proof**: If Jira adds new fields to the instance (custom fields, new standard fields), the `*all` sentinel will automatically include them without requiring code changes.
-- **Correctness**: The Jira REST API documents `*all` as the proper way to request the complete field set; expanding it violates the API contract.
-- **Custom fields**: Many Jira instances have custom fields that are not known in advance. Only the `*all` sentinel guarantees they will be included.
-- **Simplicity**: No field enumeration logic needed in the tool layer; Jira handles it.
-
-**Trade-off**: The response may be large and slow to parse. Mitigated by the null-filter (Decision #4) and optional response filtering in preprocessing.
-
-**Evidence**: Epic XG1cmts handoff — fixed `jira_get_issue` to pass `["*all"]` directly. Tests verify this behavior in `tests/unit/jira/test_issues.py`.
+**Evidence:**
+- 21 Jira mixins in `src/mcp_atlassian/jira/` + 8 Confluence mixins in `src/mcp_atlassian/confluence/`
+- Tool filtering in `utils/toolsets.py` groups by mixin (e.g., `JiraSearchMixin` tools in `search` toolset)
 
 ---
 
-### 4. Scoped Null Filter for `*all` Responses
+## 2. Separate FastMCP Servers for Jira and Confluence
 
-**Decision**: When `requested_fields == "*all"`, custom fields with null or empty-list values are **excluded** from `to_simplified_dict()` output. Explicitly-requested fields always return their value, including null.
+**Decision:** Instantiate two independent MCP servers (`jira_mcp`, `confluence_mcp`) within a parent `main_server`.
 
-**Rationale**:
-- Jira instances with thousands of defined custom fields return massive responses with mostly null values when `*all` is used. Including these nulls floods the LLM context window without adding information.
-- Callers who explicitly request a specific field by name still receive null values, preserving the documented contract: "when you ask for a specific field, you get it."
+**Rationale:**
+- **Isolation**: Jira and Confluence have separate configs, auth, and error handling. If one fails, the other continues
+- **Flexibility**: Clients can mount just the Jira server or just Confluence (important for single-product teams)
+- **Scalability**: Each server has its own dependency injection scope; easy to scale one separately
+- **Clarity**: Tool discovery is simpler when tools are scoped to a specific product
 
-**Implementation** — `src/mcp_atlassian/models/jira/issue.py:627–630`:
+**Evidence:**
+- `servers/main.py` creates both servers within the lifespan
+- `servers/jira.py` and `servers/confluence.py` define product-specific tools
+- Configuration loading is independent: `JiraConfig.from_env()` and `ConfluenceConfig.from_env()` can fail separately
 
-```python
-if self.requested_fields == "*all":
-    for internal_id, field_data_obj in self.custom_fields.items():
-        processed_value = self._process_custom_field_value(field_data_obj.get("value"))
-        if processed_value is None or (isinstance(processed_value, list) and not processed_value):
-            continue  # skip null and empty-list fields
-        result[internal_id] = {"value": processed_value}
-elif isinstance(self.requested_fields, list):
-    # explicit field requests include null values
+---
+
+## 3. OAuth Cloud-Site Validation and Deterministic Resolution (Epic 1SVldWi)
+
+**Decision:** When multiple Atlassian Cloud sites are accessible via the same OAuth token:
+1. **Validate** that the configured `ATLASSIAN_OAUTH_CLOUD_ID` (if set) is in the token's accessible resources
+2. **Reject immediately** if validation fails (raise `MCPAtlassianAuthenticationError` before caching tokens)
+3. **Resolve deterministically**: sole resource → use its ID; multiple resources + configured ID → configured ID; else → first resource (backward compat)
+
+**Rationale:**
+- **Safety**: Validation prevents misconfiguration where the token grants access to Site A, but the config expects Site B. Without validation, users silently connect to the wrong site and get confusing errors
+- **Fail-fast**: Rejection happens during OAuth setup (before tokens are cached), not during a tool call. Users see the error immediately with actionable guidance
+- **Backward compat**: Single-site accounts are unaffected (sole resource check is first); existing deployments with no `ATLASSIAN_OAUTH_CLOUD_ID` continue to use the first site
+- **Multi-tenant support**: Teams with accounts on multiple Atlassian Cloud instances can now configure which site to connect to
+
+**Key Decisions:**
+- Validation runs **before** resolution: capture configured ID, fetch resources, check membership, then resolve
+- `MCPAtlassianAuthenticationError` is raised from `_get_cloud_id()` and caught by a dedicated `except` handler in `exchange_code_for_tokens()` — the handler logs the error at ERROR level and returns `False` **before** calling `_save_tokens()`
+- Resolution priority order is: `len(resources) == 1` first (sole resource wins), then `configured_id` (explicit wins), then `resources[0]` (fallback)
+
+**Error Message Example:**
+```
+OAuth authorization failed: the authorized account can access "Site A" (abc123), but the configured ATLASSIAN_OAUTH_CLOUD_ID requires site "xyz789". Re-run setup and sign in with an account that has access to the required site.
 ```
 
-**Evidence**: Epic Rm1iZNA handoff — TOR-01-twYUvG9 regression guard at `tests/unit/jira/test_issues.py::TestIssuesMixin::test_get_issue_all_fields_excludes_null_custom_fields`.
+**Test Coverage:**
+- `TOR-02-s6Jze5H` — configured ID resolved regardless of list position
+- `TOR-02-IUNtYgO` — fallback to first resource when unconfigured
+- `TOR-02-ePsqZQq` — sole resource used regardless of configured ID (with caveats; see Known Issues)
+- `TOR-02-CE3OroW` — mismatch raises with both actual site name and required ID
+- `TOR-02-MLk6Fcn` — matching configured ID accepted (no error)
+- `TOR-02-6kYAHsQ` — `_save_tokens()` never reached when validation fails
+
+**Evidence:**
+- `src/mcp_atlassian/utils/oauth.py:310–368` — `_get_cloud_id()` implementation
+- `src/mcp_atlassian/utils/oauth.py:242–244` — exception handler in `exchange_code_for_tokens()`
+- `tests/unit/utils/test_oauth.py:TestMultiInstanceOAuthCloudIdResolution` — 6 regression tests
 
 ---
 
-### 5. DEFAULT_READ_JIRA_FIELDS as a Curated 10-Field Set
+## 4. Pydantic v2 Models with Simplified Output
 
-**Decision**: Maintain a `DEFAULT_READ_JIRA_FIELDS` constant with exactly 10 fields, aligned with the upstream sooperset/mcp-atlassian project.
+**Decision:** All API responses are deserialized into Pydantic v2 `BaseModel` subclasses extending `ApiModel`, with a `to_simplified_dict()` method for LLM consumption.
 
-**Rationale**:
-- **Performance**: Reduces response size and parsing time for typical queries.
-- **Upstream alignment**: Matches the upstream project's contract; callers needing relationship or custom field data use `jira_search_fields` to discover field IDs and pass them explicitly.
-- **Discoverability**: Explicit minimal set makes it clear what fields an LLM receives by default.
+**Rationale:**
+- **Type safety**: Validation at deserialization time catches API shape changes early
+- **Schema consistency**: OpenAPI schema generation is automatic and consistent across all models
+- **Content control**: `to_simplified_dict()` allows us to:
+  - Remove internal fields (e.g., Jira's `_links`, Confluence's `_links`)
+  - Shorten verbose keys (e.g., `issueFields.customfield_10000` → `custom_field_10000`)
+  - Mask sensitive data
+  - Normalize across Cloud vs Server/DC API variations
+- **LLM-friendly**: Simplified output reduces token usage and confusion
 
-**Fields (10):** `summary`, `description`, `status`, `assignee`, `reporter`, `labels`, `priority`, `created`, `updated`, `issuetype`
+**Trade-offs:**
+- Extra deserialization overhead (minimal in practice; APIs are the bottleneck)
+- Custom field mapping can be fragile if Atlassian changes field ID schemes
 
-**Evidence**: `tests/unit/jira/test_constants.py::TestDefaultReadJiraFields` — 4 tests confirm the set is exactly these 10 fields, length 10, no extras.
-
----
-
-### 6. Configuration via Environment Variables and Dataclasses
-
-**Decision**: Use Pydantic dataclasses (`JiraConfig`, `ConfluenceConfig`) with a `from_env()` factory method to load all configuration from environment variables at startup.
-
-**Rationale**:
-- **12-Factor compliance**: Externalizes secrets and deployment-specific settings from code.
-- **Validation**: Pydantic validates types, required fields, and constraints (e.g., URL formats) at startup, failing fast.
-- **Type safety**: Dataclass type hints enable IDE autocomplete and mypy checking.
-- **Flexibility**: Supports multiple authentication methods (Basic, PAT, OAuth) via conditional field presence.
-
-**Evidence**: `src/mcp_atlassian/jira/config.py` and `src/mcp_atlassian/confluence/config.py`.
+**Evidence:**
+- `src/mcp_atlassian/models/base.py` — `ApiModel` base class
+- All models in `src/mcp_atlassian/models/jira/` and `src/mcp_atlassian/models/confluence/` extend `ApiModel`
 
 ---
 
-### 7. Pydantic v2 for All Data Models
+## 5. Environment-Based Configuration via `from_env()` Factories
 
-**Decision**: Use Pydantic v2 (not v1) for all data models extending `ApiModel` base class with `from_api_response()` and `to_simplified_dict()` methods.
+**Decision:** Load all configuration from environment variables at startup via `from_env()` class methods on `JiraConfig` and `ConfluenceConfig`.
 
-**Rationale**:
-- **Modern**: Pydantic v2 has better performance, validation composability, and JSON schema support.
-- **Consistency**: All models use the same serialization/deserialization pattern.
-- **LLM-friendly**: The `to_simplified_dict()` method strips internal fields and complex nested structures, producing clean dicts for LLM consumption.
+**Rationale:**
+- **12-factor compliance**: Config separate from code
+- **Multi-environment support**: Same Docker image runs in dev, staging, production with different env vars
+- **No secrets in code**: Credentials are never hardcoded or in config files
+- **IDE/MCP integration**: Claude Desktop and Cursor load env vars from `mcpServers` config in `settings.json`
 
-**Evidence**: All models in `src/mcp_atlassian/models/` extend `ApiModel` and implement both factory methods.
+**Configuration methods (in priority order):**
+1. Environment variables (e.g., `JIRA_USERNAME`)
+2. OS keyring (for OAuth tokens)
+3. Defaults in code (fallback)
 
----
-
-### 8. TTLCache for Short-Lived Response Caching
-
-**Decision**: Implement response caching via TTLCache (from cachetools) with a configurable TTL (default 5 minutes) in the `CachingMixin`.
-
-**Rationale**:
-- **Reduce API calls**: Repeated queries within the TTL window reuse cached responses, reducing Atlassian API load.
-- **Configurable**: TTL can be adjusted via env var (`JIRA_CACHE_TTL_SECONDS`, etc.) for different use cases.
-
-**Cache key**: Method name + arguments (e.g., `get_issue(PROJECT-123)` → `get_issue|PROJECT-123`).
+**Evidence:**
+- `src/mcp_atlassian/jira/config.py` — `JiraConfig.from_env()`
+- `src/mcp_atlassian/confluence/config.py` — `ConfluenceConfig.from_env()`
+- `.env.example` — comprehensive list of all options
 
 ---
 
-### 9. Content Conversion: ADF → Markdown, Storage XML → Markdown
+## 6. Content Preprocessing: ADF/Storage → Markdown
 
-**Decision**: Convert Atlassian Document Format (ADF) and Confluence Storage XML to Markdown for LLM readability.
+**Decision:** Convert raw Atlassian content formats (ADF for Jira, Storage for Confluence) to Markdown before returning to LLM.
 
-**Rationale**:
-- **Clarity**: Markdown is human-readable and widely understood by LLMs.
-- **Consistency**: Both Jira (ADF) and Confluence (Storage XML) are converted to the same format.
+**Rationale:**
+- **Consistency**: Cloud and Server/DC use different internal formats (ADF vs Storage); Markdown normalizes them
+- **LLM-friendly**: Markdown is more compact than ADF/Storage XML and natural for language models
+- **Readability**: Users see Markdown in tool responses, not raw API formats
+- **Formatting preservation**: Bold, italic, lists, code blocks are preserved
 
-**Trade-off**: Conversion can lose fidelity for complex ADF structures (embedded macros, custom formatting).
+**Converters:**
+- `preprocessing/jira.py` — ADF → Markdown (handles rich text, mentions, links, embeds)
+- `preprocessing/confluence.py` — Storage → Markdown
 
-**Evidence**: `src/mcp_atlassian/preprocessing/jira.py` and `src/mcp_atlassian/preprocessing/confluence.py`.
+**Trade-offs:**
+- Complex ADF/Storage structures may not map perfectly to Markdown (e.g., multi-column layouts → text approximation)
+- Converters must be maintained if Atlassian introduces new format features
 
----
-
-### 10. Project-Level Access Control
-
-**Decision**: Implement access control at the project level with two modes: whitelist (allow specific projects) and blocklist (block or mark specific projects as read-only).
-
-**Rationale**:
-- **Multi-tenant safety**: Prevents cross-tenant data leakage when a single MCP server instance serves multiple users.
-- **Early validation**: Access checks run **before** API calls, preventing unnecessary Atlassian API calls to unauthorized projects.
-
-**Implementation**: `utils/access_control.py` provides `check_jira_project_access()` called in issue-related tools.
-
----
-
-### 11. Read-Only Mode at Server Level
-
-**Decision**: Implement a global `READ_ONLY_MODE` flag that blocks all write tools before they execute.
-
-**Rationale**:
-- **Safety**: Prevents accidental mutations in read-only environments (e.g., demos, audits, non-prod).
-- **Simplicity**: Single flag controls all write operations without per-tool configuration.
+**Evidence:**
+- `src/mcp_atlassian/preprocessing/jira.py` — ADF parser
+- `src/mcp_atlassian/preprocessing/confluence.py` — Storage parser
+- Returns use `.to_simplified_dict()` which includes preprocessed `description`, `content`, etc. as Markdown
 
 ---
 
-## Known Issues
+## 7. Tool Enablement Filtering via Environment
 
-### Pre-existing Issues (not introduced by recent epics)
+**Decision:** Allow operators to enable/disable tools at server startup via `ENABLED_TOOLS`, `DISABLED_TOOLS`, `READ_ONLY_MODE`, and `ENABLED_*_TOOLSETS` environment variables.
 
-- **Unreachable code warning:** `issue.py:260` — mypy reports `Statement is unreachable [unreachable]` (no behavior impact, low priority)
-- **Windows path test failure:** `tests/unit/jira/test_attachments.py` — `/tmp/` vs `C:\tmp\` mismatch on Windows runners (isolated to attachment test)
-- **TTLCache type argument warning:** `servers/main.py` — `TTLCache` instantiated with 2 type arguments where 3 are expected (no runtime impact)
-- **Weak test assertions:** `test_search.py` — some secondary sub-assertions use `or True` guards, rendering them always-passing (primary assertions are correct)
+**Rationale:**
+- **Security**: `READ_ONLY_MODE=true` blocks all write operations (no deletion, creation, updates)
+- **Least privilege**: Teams can disable risky tools (e.g., disable `jira_delete_issue` if deletion is not needed)
+- **Feature gating**: Disable search tools if CQL queries are expensive in your environment
+- **Compliance**: Audit trails remain clean if certain operations are disabled from the start
 
-### Deferred Work
+**Filtering logic:**
+- `ENABLED_TOOLS` (whitelist): If set, only these tools are available
+- `DISABLED_TOOLS` (blacklist): If set, these tools are hidden
+- `READ_ONLY_MODE=true` (kill switch): All write tools are disabled
+- `ENABLED_JIRA_TOOLSETS` (group filter): e.g., `core,search` enables only tools in those toolsets
 
-- **Upstream contribution:** File upstream issues against `sooperset/mcp-atlassian` for the `*all` field sentinel fix and null-filter. Create `contrib/` branch off `upstream/main`.
-- **Multi-tenant OAuth:** Epic 1SVldWi (Not Started) — requires enhanced session storage and tenant-aware token refresh.
+**Entry points:**
+- `utils/tools.py` — per-tool filtering
+- `utils/toolsets.py` — toolset grouping and filtering
+- `servers/main.py` — applies filtering during tool registration
 
----
-
-## Testing Strategy
-
-**Unit tests** (fast, isolated):
-- Model serialization (`to_simplified_dict()` output)
-- Field filtering logic (null/empty-list exclusion in `*all` mode)
-- Field constant verification (exact 10-field set)
-
-**Integration tests** (require real Jira/Confluence):
-- End-to-end OAuth flow
-- Per-tenant client isolation
-- API compatibility (Cloud vs Server/DC)
-
-**Pre-commit hooks:**
-- Ruff linting (88-char line length)
-- mypy type checking (strict mode on `src/`, relaxed on `tests/`)
-- Import sorting
+**Evidence:**
+- `src/mcp_atlassian/utils/tools.py:get_enabled_tools()`, `should_include_tool()`
+- `src/mcp_atlassian/utils/toolsets.py:get_enabled_toolsets()`, `should_include_tool_by_toolset()`
+- Filtering applied in `servers/main.py` lifespan before tools are registered
 
 ---
 
-## Architectural Invariants
+## 8. FastMCP + Starlette HTTP Server for OAuth Callbacks
 
-1. **Null filtering is read-only:** `to_simplified_dict()` filters; request handling does not mutate API response payloads.
-2. **Explicit requests bypass filtering:** If a caller asks for a specific field, they get its value, even if null.
-3. **Cloud and Server/DC branches are stable:** Code uses `is_cloud` to partition logic; both paths are tested.
-4. **Tool naming is consistent:** `{service}_{action}_{target}` pattern held across all tools.
-5. **Models are immutable in transit:** Pydantic models are frozen at the API boundary; no in-flight mutation.
+**Decision:** Use FastMCP's `StarletteWithLifespan` to run an HTTP server on localhost for OAuth callback handling.
+
+**Rationale:**
+- **Interactive setup**: `uv run mcp-atlassian --oauth-setup` launches a browser, user authorizes, browser redirects to localhost callback
+- **Token exchange**: Callback endpoint exchanges authorization code for tokens
+- **Transparent**: User runs one command; browser automation handles the rest
+- **Secure**: Uses PKCE (Proof Key for Code Exchange) for extra security in public clients
+
+**Flow:**
+1. `--oauth-setup` flag triggers `oauth_setup.py`
+2. Browser opens to Atlassian auth endpoint with `state` + `code_challenge`
+3. User authorizes; Atlassian redirects to `http://localhost:PORT/callback?code=...&state=...`
+4. Callback handler exchanges code for tokens via `OAuthConfig.exchange_code_for_tokens()`
+5. Tokens are stored in keyring; user sees success/error message in browser
+
+**Evidence:**
+- `src/mcp_atlassian/utils/oauth_setup.py` — interactive setup
+- `src/mcp_atlassian/servers/oauth_proxy.py` — callback handler
+- `src/mcp_atlassian/servers/main.py:main_lifespan()` — server startup
+
+---
+
+## 9. Cloud vs Server/Data Center Abstraction
+
+**Decision:** Detect the deployment type (Cloud vs Server/DC) based on URL shape and API responses, then conditionally apply Cloud-specific or DC-specific logic.
+
+**Rationale:**
+- **Single codebase**: One fetcher supports both Cloud and Server/DC without branching at the tool level
+- **API differences**: Jira Cloud uses REST v3; Server/DC uses v2 or hybrid. Confluence Cloud uses v2; Server/DC uses legacy REST.
+- **Field naming**: Cloud uses field IDs (e.g., `customfield_10000`); Server/DC uses field keys (e.g., `cf[10000]`). Abstraction hides this.
+- **OAuth support**: Both Cloud and Server/DC support OAuth, but token refresh behavior differs.
+
+**Detection:**
+- `is_atlassian_cloud_url(url)` checks if URL contains `.atlassian.net` (Cloud indicator)
+- `is_cloud` property on fetchers delegates to config
+- Conditionals: `if self.is_cloud: ...` or `if self.fetcher.is_cloud: ...`
+
+**Examples:**
+```python
+# In OAuthConfig.token_url property:
+if self.is_data_center and self.base_url:
+    return f"{self.base_url.rstrip('/')}{DC_TOKEN_PATH}"
+return CLOUD_TOKEN_URL
+
+# In JiraFetcher._construct_search_endpoint():
+if self.is_cloud:
+    return f"{self.base_url}/rest/api/3/search"
+else:
+    return f"{self.base_url}/rest/api/2/search"
+```
+
+**Evidence:**
+- `src/mcp_atlassian/utils/urls.py:is_atlassian_cloud_url()`
+- `src/mcp_atlassian/jira/client.py` — `is_cloud` property
+- Multiple `if self.is_cloud:` conditionals throughout jira/ and confluence/
+
+---
+
+## 10. Structured Logging with Masking
+
+**Decision:** Use Python's `logging` module with structured context, and mask sensitive data (tokens, credentials) in all log output.
+
+**Rationale:**
+- **Debugging**: Structured logs with context (issue key, project, exception) make debugging easier
+- **Security**: Tokens and credentials are masked (`••••••`) before being logged, preventing accidental exposure in logs
+- **Auditability**: Log levels (INFO, WARNING, ERROR) help identify issues
+
+**Masking targets:**
+- OAuth tokens (access_token, refresh_token)
+- API tokens (JIRA_API_TOKEN, etc.)
+- Basic auth credentials (username:password)
+- Custom field values containing sensitive keywords (password, secret, token)
+
+**Entry points:**
+- `utils/logging.py:mask_sensitive()` — applies masks to log messages
+- Configured in logger setup in `servers/main.py`
+
+**Evidence:**
+- `src/mcp_atlassian/utils/logging.py` — masking logic
+- `mask_sensitive()` called before logging sensitive data
+
+---
+
+## 11. Dependency Injection via Request Context
+
+**Decision:** Store configuration and fetcher instances in `MainAppContext` (per-request context) and retrieve them via helper functions.
+
+**Rationale:**
+- **Testability**: Mock context in unit tests; inject real context in integration tests
+- **Thread safety**: Each request has its own context; no shared state
+- **Lazy initialization**: Fetchers are created once per request (or cached in context)
+- **Type safety**: Context is strongly typed via `MainAppContext` dataclass
+
+**Usage:**
+```python
+# In a tool handler:
+async def jira_get_issue(request: Request, key: str) -> dict:
+    fetcher = get_jira_fetcher(request.ctx)
+    return fetcher.get_issue(key).to_simplified_dict()
+```
+
+**Evidence:**
+- `src/mcp_atlassian/servers/context.py` — `MainAppContext` dataclass
+- `src/mcp_atlassian/servers/dependencies.py` — helper functions
+- All tools in `servers/jira.py` and `servers/confluence.py` retrieve fetchers via context
+
+---
+
+## Known Issues and Deferred Work
+
+### TOR-02-ePsqZQq: Incomplete Test Coverage for Sole Resource with Configured ID
+
+**Issue:** TOR-02-ePsqZQq specifies "resolve to sole resource regardless of whether a cloud ID is configured". The test covers the case where `cloud_id=None` and a sole resource is returned. However, the case where a sole resource matches a configured ID (e.g., configured `xyz789`, sole resource is `xyz789`) is not independently tested.
+
+**Current state:** The underlying logic is correct and trivially verifiable by code inspection (`if len(resources) == 1: self.cloud_id = resources[0]["id"]` overwrites configured ID), and the case is implicitly tested by `TOR-02-MLk6Fcn`. However, explicit independent test coverage would make this more robust.
+
+**Workaround:** Code inspection confirms correctness. Low priority — the resolution logic is simple and the MLk6Fcn test exercises the combined case.
+
+**Follow-up:** Add a standalone test case `test_get_cloud_id_sole_resource_overwrites_configured` that explicitly verifies a sole resource is used even when a different configured ID is set.
+
+### Manual End-to-End Test for Multi-Instance OAuth
+
+**Issue:** The multi-instance OAuth path (token with access to 2+ Atlassian Cloud organizations + `ATLASSIAN_OAUTH_CLOUD_ID` configured to a non-first site) cannot be exercised without an account that has access to multiple Atlassian Cloud organizations.
+
+**Current state:** All TOR requirements are unit-tested. However, a reviewer with a multi-org account should manually run:
+```bash
+ATLASSIAN_OAUTH_CLOUD_ID=<some-non-first-site-id> uv run mcp-atlassian --oauth-setup
+```
+And verify: (1) the correct site is selected (not the first), and (2) a wrong configured ID produces the expected actionable error message rather than silently connecting to the wrong site.
+
+**Workaround:** Unit tests cover all code paths. Code inspection of `_get_cloud_id()` verifies correctness.
+
+### Windows Sync Issue: `uv sync` PEP 440 Validation
+
+**Issue:** Running `uv sync --frozen --all-extras --dev` locally on the peakflames fork fails with:
+```
+ValueError: Version 'X.Y.ZpeakflamesN' does not conform to the PEP 440 style
+```
+
+**Root cause:** Fork tags use the pattern `vX.Y.Z-peakflames.N` (e.g., `v0.21.2-peakflames.1`). When `uv sync` runs without `--no-editable`, it triggers hatchling's editable install, which calls `uv-dynamic-versioning`. That tool reads the git tag and tries to convert it to a version string, which fails PEP 440 validation for pre-release suffixes like `-peakflames.N`.
+
+**Workaround:** Always use `uv sync --no-editable --frozen --all-extras --dev`. This bypasses the hatchling editable build entirely and matches the Dockerfile's approach. See CLAUDE.md for details.
+
+**Impact:** Developers working on the fork must remember to add `--no-editable`. The Docker build is unaffected (it already uses `--no-editable`). CI/CD is unaffected.
+
+### Pre-commit mypy Error in `servers/main.py`
+
+**Issue:** mypy reports a pre-existing error on `servers/main.py:363`:
+```
+error: Missing type parameters for generic type "TTLCache" [type-arg]
+```
+
+**Status:** This error existed before Epic 1SVldWi and is unrelated to OAuth validation. It does not block commits or deployments.
+
+**Workaround:** Error is in the main branch; not addressed in this epic.
 
 ---
 
 ## Future Considerations
 
-1. **Performance optimization:** Cache field definitions per instance to reduce descriptor API calls.
-2. **Rate limit handling:** Backoff strategy for high-volume search and bulk operations.
-3. **Workspace federation:** Support for Jira Service Management, Portfolio, and Automation Server.
-4. **Extended content preprocessing:** Preserve embedded images, handle complex macros with fallback text.
-5. **Real-time sync:** Stream issue and page updates via webhooks.
-
----
-
-*Last reviewed: 2026-07-14 (Epic Rm1iZNA completion)*  
-*Next review: After Epic 1SVldWi completion (TOR-02 Multi-Instance OAuth)*
+1. **Refresh token rotation**: OAuth servers sometimes rotate refresh tokens on token refresh. Consider tracking token age and re-running setup if refresh fails.
+2. **Multi-tenant UI**: A settings panel to switch between Cloud sites after OAuth setup (instead of requiring reconfiguration).
+3. **Rate limiting**: Add client-side rate limiting (e.g., exponential backoff) for API calls.
+4. **GraphQL support**: Jira Cloud's GraphQL API offers more efficient queries for certain operations.
+5. **Field caching strategy**: Cache field metadata longer (currently per-request) to reduce API calls.
