@@ -288,6 +288,33 @@ async def jira_get_issue(request: Request, key: str) -> dict:
 
 ---
 
+## 12. `*all` Sentinel Passthrough and Null Custom-Field Filtering (Epic jirafix)
+
+**Decision:** `jira_get_issue(fields="*all")` passes the `"*all"` sentinel directly to the Jira REST API instead of substituting the default 10-field set. `JiraIssue.to_simplified_dict()` then excludes any custom field whose value is `null` or an empty list from `*all` responses.
+
+**Rationale:**
+- **Correctness**: Callers requesting `*all` expect every populated field, including custom fields. Silently substituting a default field list broke that contract.
+- **Context efficiency**: Some Jira instances define thousands of custom fields per issue type; most are unset for any given issue. Returning `{"value": null}` for each would flood LLM context with noise. Filtering null/empty-list values keeps the response focused on fields that actually carry data.
+- **Scoped fix**: The filter only applies to the `*all` branch — explicit field-name requests (e.g., `fields="customfield_10334"`) are returned as-is, preserving the existing contract for callers who name specific fields (even if the value turns out to be null).
+
+**Key Decisions:**
+- `DEFAULT_READ_JIRA_FIELDS` itself was not changed — it's confirmed at exactly the upstream 10-field set (`summary, description, status, assignee, reporter, labels, priority, created, updated, issuetype`); the fix is purely about not substituting it when the caller explicitly asked for `*all`.
+- The null/empty-list check lives in the `*all` branch of `to_simplified_dict()`, immediately after custom-field value processing — a field is skipped if `processed_value is None or (isinstance(processed_value, list) and not processed_value)`.
+
+**Test Coverage:**
+- `TOR-01-BJ2CyHG` — `*all` passes directly to the API; a real custom field is returned
+- `TOR-01-9TP0naJ` — explicit field-name requests are unaffected by the `*all` fix
+- `TOR-01-uzPp7yt` — `*all` responses with no custom fields are well-formed
+- `TOR-01-twYUvG9` — null and empty-list custom fields are excluded from `*all` output
+- `TOR-01-sa52UmE` — `DEFAULT_READ_JIRA_FIELDS` is exactly the 10-field upstream set
+
+**Evidence:**
+- `src/mcp_atlassian/jira/issues.py` — `*all` sentinel passthrough
+- `src/mcp_atlassian/models/jira/issue.py` — null/empty-list filter in the `*all` branch of `to_simplified_dict()`
+- `tests/unit/jira/test_issues.py`, `tests/unit/jira/test_constants.py` — regression tests, one per TOR
+
+---
+
 ## Known Issues and Deferred Work
 
 ### TOR-02-ePsqZQq: Incomplete Test Coverage for Sole Resource with Configured ID
