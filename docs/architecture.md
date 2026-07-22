@@ -2,7 +2,7 @@
 
 ## System Overview
 
-MCP Atlassian is a Model Context Protocol (MCP) server that bridges Atlassian products (Jira and Confluence) with AI language models. It provides 72+ tools for querying and managing Jira issues, Confluence pages, and related resources across both Cloud and Server/Data Center deployments.
+MCP Atlassian is a Model Context Protocol (MCP) server that bridges Atlassian products (Jira and Confluence) with AI language models. It provides 73 tools (49 Jira, 24 Confluence) for querying and managing Jira issues, Confluence pages, and related resources across both Cloud and Server/Data Center deployments.
 
 The server exposes two independent FastMCP instances (`jira_mcp` and `confluence_mcp`), each wrapping domain-specific client fetchers (`JiraFetcher` and `ConfluenceFetcher`) that compose multiple mixins for feature organization.
 
@@ -52,10 +52,12 @@ The server exposes two independent FastMCP instances (`jira_mcp` and `confluence
 │   │   ├── worklog.py           # Time tracking
 │   │   ├── development.py       # DevOps/deployment tracking
 │   │   ├── queues.py            # Service Desk queues
-│   │   ├── forms.py             # Forms UI
-│   │   ├── forms_api.py         # Forms API
+│   │   ├── forms.py             # Forms UI (legacy; not composed into JiraFetcher)
+│   │   ├── forms_api.py         # Forms REST API mixin (supersedes forms.py)
+│   │   ├── forms_common.py      # Shared ProForma helpers
 │   │   ├── formatting.py        # ADF formatting utilities
 │   │   ├── constants.py         # Field constants
+│   │   ├── utils.py             # Jira-specific helpers (JQL reserved words, etc.)
 │   │   └── protocols.py         # Type protocols
 │   │
 │   ├── confluence/              # Confluence client + 8 mixins
@@ -71,10 +73,12 @@ The server exposes two independent FastMCP instances (`jira_mcp` and `confluence
 │   │   ├── analytics.py         # Page analytics
 │   │   ├── v2_adapter.py        # Cloud v2 API adapter
 │   │   ├── constants.py         # Constants
+│   │   ├── utils.py             # Confluence-specific helpers (CQL reserved words, etc.)
 │   │   └── protocols.py         # Type protocols
 │   │
 │   ├── models/                  # Pydantic v2 data models
 │   │   ├── base.py              # ApiModel base class
+│   │   ├── constants.py         # Shared model-layer constants
 │   │   ├── jira/                # Jira-specific models
 │   │   └── confluence/          # Confluence-specific models
 │   │
@@ -94,7 +98,7 @@ The server exposes two independent FastMCP instances (`jira_mcp` and `confluence
 │   │
 │   ├── utils/                   # Shared utilities
 │   │   ├── oauth.py             # OAuth 2.0 config + flow
-│   │   ├── auth.py              # Auth header builders
+│   │   ├── access_control.py    # Per-project/space BLOCKED/READONLY enforcement
 │   │   ├── ssl.py               # SSL verification
 │   │   ├── urls.py              # URL validation + routing
 │   │   ├── logging.py           # Structured logging + masking
@@ -132,34 +136,44 @@ The server exposes two independent FastMCP instances (`jira_mcp` and `confluence
 Clients are built using mixin classes for feature organization:
 
 ```python
-# JiraFetcher composes 21 mixins:
+# JiraFetcher composes 21 mixins (src/mcp_atlassian/jira/__init__.py):
 class JiraFetcher(
-    JiraIssuesMixin,
-    JiraSearchMixin,
-    JiraFieldsMixin,
-    JiraFieldOptionsMixin,
-    JiraBoardsMixin,
-    JiraSprintsMixin,
-    JiraSLAMixin,
-    JiraMetricsMixin,
-    JiraCommentsMixin,
-    JiraAttachmentsMixin,
-    JiraProjectsMixin,
-    JiraLinksMixin,
-    JiraEpicsMixin,
-    JiraTransitionsMixin,
-    JiraUsersMixin,
-    JiraWatchersMixin,
-    JiraWorklogMixin,
-    JiraDevelopmentMixin,
-    JiraQueuesMixin,
-    JiraFormsMixin,
-    JiraFormsMixin,
-    JiraFormsMixin,
+    ProjectsMixin,
+    FieldsMixin,
+    FieldOptionsMixin,
+    FormsApiMixin,   # Forms REST API — supersedes the legacy FormsMixin (forms.py)
+    FormattingMixin,
+    TransitionsMixin,
+    WorklogMixin,
+    EpicsMixin,
+    CommentsMixin,
+    SearchMixin,
+    IssuesMixin,
+    UsersMixin,
+    WatchersMixin,
+    BoardsMixin,
+    SprintsMixin,
+    QueuesMixin,
+    AttachmentsMixin,
+    LinksMixin,
+    MetricsMixin,
+    SLAMixin,
+    DevelopmentMixin,
 ):
     pass
 
-# ConfluenceFetcher composes 8 mixins similarly
+# ConfluenceFetcher composes 8 mixins (src/mcp_atlassian/confluence/__init__.py):
+class ConfluenceFetcher(
+    SearchMixin,
+    SpacesMixin,
+    PagesMixin,
+    CommentsMixin,
+    LabelsMixin,
+    UsersMixin,
+    AnalyticsMixin,
+    AttachmentsMixin,
+):
+    pass
 ```
 
 **Rationale:**
@@ -267,6 +281,8 @@ Models are defined for:
 - Jira: issues, projects, sprints, boards, comments, workflows, SLA, etc.
 - Confluence: pages, spaces, comments, attachments, labels, analytics, etc.
 
+**`*all` field requests (Epic jirafix):** `jira_get_issue(fields="*all")` passes the `*all` sentinel directly to the Jira REST API (rather than substituting the default 10-field set), so every populated field — including custom fields — is returned. `JiraIssue.to_simplified_dict()` then filters out custom fields whose value is `null` or an empty list, so instances with large custom-field catalogs don't flood LLM context with empty entries. Explicit field-name requests are unaffected — the filter only applies to the `*all` branch.
+
 ---
 
 ### 6. **Content Preprocessing**
@@ -298,41 +314,37 @@ Tools can be selectively enabled/disabled via:
 
 ## Tool Categories & Counts
 
-### Jira Tools (47 total)
+### Jira Tools (49 total)
 
 | Category | Count | Examples |
 |----------|-------|----------|
-| **Issues** | 8 | get, create, update, search, transition, batch create |
-| **Fields & Options** | 3 | get field options, search fields, get field metadata |
-| **Projects** | 2 | get all projects, get project issues |
-| **Comments** | 3 | add, edit, delete comments |
-| **Attachments** | 2 | download, list attachments |
-| **Agile (Boards/Sprints)** | 5 | get boards, get sprints, get board issues, add to sprint |
-| **Epics** | 1 | link to epic |
-| **Transitions** | 1 | get transitions |
-| **Watchers** | 2 | add/get watchers |
+| **Issues** | 7 | get, search, create, batch create, update, delete, batch get changelogs |
+| **Fields & Options** | 2 | search fields, get field options |
+| **Projects & Versions** | 6 | get all projects, get project issues/versions/components, create version, batch create versions |
+| **Comments** | 2 | add, edit comment |
+| **Attachments** | 2 | download attachments, get issue images |
+| **Agile (Boards/Sprints)** | 7 | get boards, get sprints, get board/sprint issues, create/update sprint, add issues to sprint |
+| **Links & Epics** | 5 | get link types, create/remove issue link, create remote issue link, link to epic |
+| **Transitions** | 2 | get transitions, transition issue |
+| **Watchers** | 3 | get, add, remove watchers |
 | **Worklog** | 2 | add/get work logs |
-| **Development** | 2 | get development info |
-| **SLA** | 1 | get SLA metrics |
-| **Metrics** | 2 | get issue dates, metrics |
-| **Forms** | 3 | get proforma forms, update answers |
-| **Links** | 2 | create issue links, get link types |
-| **Queues** | 2 | get Service Desk queues + issues |
-| **Users** | 1 | get user profile |
+| **Development** | 2 | get issue/issues development info |
+| **SLA & Dates** | 2 | get issue SLA, get issue dates |
+| **Service Desk / Queues** | 3 | get service desk, get queues, get queue issues |
+| **Forms** | 3 | get proforma forms, get form details, update form answers |
+| **User Profile** | 1 | get user profile |
 
-### Confluence Tools (25 total)
+### Confluence Tools (24 total)
 
 | Category | Count | Examples |
 |----------|-------|----------|
-| **Pages** | 5 | get, create, update, move, get children |
+| **Pages** | 7 | get, get children, get space page tree, create, update, delete, move |
 | **Search** | 2 | search pages, search users |
 | **Comments** | 3 | get, add, reply to comments |
-| **Attachments** | 4 | get, upload, download, list |
-| **Spaces** | 2 | get space info, list spaces |
 | **Labels** | 2 | get, add labels |
+| **History / Diff / Views** | 3 | get page history, page diff, page views |
+| **Attachments** | 6 | upload (single/multi), get, download (single/bulk), delete |
 | **Images** | 1 | get page images |
-| **Metadata** | 2 | get page history, page views |
-| **Other** | 4 | diff, add comment, get page diff |
 
 ---
 
@@ -437,10 +449,9 @@ uv run pytest --cov=src/mcp_atlassian --cov-report=term-missing  # Coverage
 
 The project publishes multi-platform Docker images via GitHub Actions:
 
-**Dockerfile stages:**
-1. **Python 3.13-slim base** → install dependencies via `uv`
-2. **Runtime stage** → copy app + dependencies
-3. **Entry point** → `mcp-atlassian` command
+**Dockerfile stages (2-stage build):**
+1. **Builder (`uv` stage)** — `ghcr.io/astral-sh/uv:python3.13-alpine`; generates the lockfile and installs dependencies + the project via `uv sync --frozen --no-dev --no-editable`
+2. **Final (runtime)** — `python:3.13-alpine`; copies only the built `.venv` from the builder stage, runs as non-root user `app`, entrypoint `mcp-atlassian`
 
 Image tags follow semver + fork suffix:
 - `sooperset/mcp-atlassian:0.21.2` (upstream)

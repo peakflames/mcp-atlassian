@@ -1276,3 +1276,4 @@ class TestSearchMixin:
         call_args = search_mixin.jira.jql.call_args
         actual_jql = call_args[0][0] if call_args[0] else call_args[1].get("jql", "")
         assert "RO" not in actual_jql
+

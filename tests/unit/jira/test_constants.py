@@ -39,7 +39,6 @@ class TestDefaultReadJiraFields:
     def test_field_format_validity(self):
         """Test that field names are valid for API usage."""
         for field in DEFAULT_READ_JIRA_FIELDS:
-            # Fields should be non-empty, lowercase, no spaces
             assert field and field.islower()
             assert " " not in field
             assert not field.startswith("_")

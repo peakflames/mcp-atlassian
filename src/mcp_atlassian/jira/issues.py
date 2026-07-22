@@ -102,11 +102,11 @@ class IssuesMixin(
                 set(fields_param.split(",")) if fields_param != "*all" else None
             )
             if fields_param == "*all" or fields_set == DEFAULT_READ_JIRA_FIELDS:
-                # Default fields are being used - preserve the order
+                # Default fields are being used - preserve the order.
+                # For *all, keep ["*all"] so the API receives the full-catalog
+                # sentinel rather than a truncated default list.
                 default_fields_list = (
-                    fields_param.split(",")
-                    if fields_param != "*all"
-                    else list(DEFAULT_READ_JIRA_FIELDS)
+                    fields_param.split(",") if fields_param != "*all" else ["*all"]
                 )
                 additional_fields = []
 
