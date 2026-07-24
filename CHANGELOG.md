@@ -5,6 +5,26 @@ Fork tags follow the pattern `vX.Y.Z-peakflames.N` and publish Docker images
 to `peakflames/mcp-atlassian` (see `.github/workflows/docker-publish.yml`).
 Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
+## v0.21.2-peakflames.3
+
+### Features
+
+- Resolve and validate the OAuth cloud site for multi-instance tokens, so a
+  single OAuth token spanning multiple Atlassian sites resolves to the correct
+  cloud id (`src/mcp_atlassian/utils/oauth.py`).
+
+### Fixes
+
+- Return complete Jira issue fields: pass the `*all` sentinel directly and
+  filter null custom fields, and revert `DEFAULT_READ_JIRA_FIELDS` to the
+  upstream 10-field set (`src/mcp_atlassian/jira/issues.py`,
+  `src/mcp_atlassian/models/jira/issue.py`, `src/mcp_atlassian/exceptions.py`).
+
+### Docs
+
+- Refresh architecture and design notes to the as-built state and add the
+  implementation-plan docs for the Jira field fixes.
+
 ## v0.21.2-peakflames.2
 
 ### Docs
