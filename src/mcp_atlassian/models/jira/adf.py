@@ -6,18 +6,54 @@ Supports both ADF → plain text (for reading) and Markdown → ADF (for writing
 """
 
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
+# A mention resolver maps a user identifier (display name, email, or an
+# ``accountid:<id>`` token) to a Jira Cloud account ID, or ``None`` when the
+# user cannot be resolved. Injected by the client layer so this module stays
+# free of any Jira API dependency.
+MentionResolver = Callable[[str], str | None]
 
-def _parse_inline_formatting(text: str) -> list[dict[str, Any]]:
+
+def _make_mention_node(identifier: str, account_id: str) -> dict[str, Any]:
+    """Build an ADF mention node for a resolved user.
+
+    Args:
+        identifier: The original identifier written by the caller (used as
+            the human-readable fallback label).
+        account_id: The resolved Jira Cloud account ID.
+
+    Returns:
+        An ADF ``mention`` inline node.
+    """
+    label = identifier.strip()
+    if label.startswith("accountid:"):
+        label = label[len("accountid:") :].strip()
+    return {
+        "type": "mention",
+        "attrs": {"id": account_id, "text": f"@{label}"},
+    }
+
+
+def _parse_inline_formatting(
+    text: str, mention_resolver: MentionResolver | None = None
+) -> list[dict[str, Any]]:
     """Parse inline Markdown formatting into ADF inline nodes.
 
     Handles: bold (**), italic (*), inline code (`), links ([text](url)),
-    and strikethrough (~~).
+    strikethrough (~~), and user mentions (``@[identifier]`` or
+    ``[~identifier]``).
+
+    Mentions are only converted to ADF ``mention`` nodes when a
+    ``mention_resolver`` is supplied and it resolves the identifier to an
+    account ID; otherwise the original mention text is preserved verbatim.
 
     Args:
         text: Raw text potentially containing inline Markdown formatting.
+        mention_resolver: Optional callable resolving a user identifier
+            (display name, email, or ``accountid:<id>``) to an account ID.
 
     Returns:
         List of ADF inline nodes (text nodes with optional marks).
@@ -26,9 +62,12 @@ def _parse_inline_formatting(text: str) -> list[dict[str, Any]]:
         return []
 
     nodes: list[dict[str, Any]] = []
-    # Pattern order matters: bold before italic, code before others
+    # Pattern order matters: mentions and code before the rest, bold before
+    # italic. Mention forms: ``@[Display Name]`` and ``[~identifier]``.
     inline_re = re.compile(
-        r"`(?P<code_inner>[^`]+)`"
+        r"@\[(?P<mention_at>[^\]]+)\]"
+        r"|\[~(?P<mention_tilde>[^\]]+)\]"
+        r"|`(?P<code_inner>[^`]+)`"
         r"|\*\*(?P<bold_inner>.+?)\*\*"
         r"|~~(?P<strike_inner>.+?)~~"
         r"|\[(?P<link_text>[^\]]+)\]\((?P<link_href>[^)]+)\)"
@@ -42,6 +81,20 @@ def _parse_inline_formatting(text: str) -> list[dict[str, Any]]:
             plain = text[pos : m.start()]
             if plain:
                 nodes.append({"type": "text", "text": plain})
+
+        mention_id = m.group("mention_at")
+        if mention_id is None:
+            mention_id = m.group("mention_tilde")
+        if mention_id is not None:
+            account_id = mention_resolver(mention_id) if mention_resolver else None
+            if account_id:
+                nodes.append(_make_mention_node(mention_id, account_id))
+            else:
+                # Unresolved (or no resolver): keep the original text so no
+                # information is lost and nothing renders as a broken mention.
+                nodes.append({"type": "text", "text": m.group(0)})
+            pos = m.end()
+            continue
 
         if m.group("code_inner") is not None:
             nodes.append(
@@ -104,20 +157,26 @@ def _parse_inline_formatting(text: str) -> list[dict[str, Any]]:
     return nodes
 
 
-def _make_paragraph(text: str) -> dict[str, Any]:
+def _make_paragraph(
+    text: str, mention_resolver: MentionResolver | None = None
+) -> dict[str, Any]:
     """Create an ADF paragraph node from text with inline formatting."""
-    content = _parse_inline_formatting(text)
+    content = _parse_inline_formatting(text, mention_resolver)
     if not content:
         content = [{"type": "text", "text": ""}]
     return {"type": "paragraph", "content": content}
 
 
-def _make_list_item(text: str) -> dict[str, Any]:
+def _make_list_item(
+    text: str, mention_resolver: MentionResolver | None = None
+) -> dict[str, Any]:
     """Create an ADF listItem node wrapping a paragraph."""
-    return {"type": "listItem", "content": [_make_paragraph(text)]}
+    return {"type": "listItem", "content": [_make_paragraph(text, mention_resolver)]}
 
 
-def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
+def markdown_to_adf(
+    markdown_text: str, mention_resolver: MentionResolver | None = None
+) -> dict[str, Any]:
     """Convert Markdown text to ADF (Atlassian Document Format) document.
 
     Implements a line-by-line parser that handles common Markdown constructs.
@@ -125,6 +184,11 @@ def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
 
     Args:
         markdown_text: Markdown-formatted text to convert.
+        mention_resolver: Optional callable resolving a user identifier
+            (display name, email, or ``accountid:<id>``) to a Jira Cloud
+            account ID. When supplied, ``@[identifier]`` and ``[~identifier]``
+            tokens become ADF ``mention`` nodes; otherwise they are left as
+            literal text.
 
     Returns:
         ADF document dict with version, type, and content keys.
@@ -181,7 +245,7 @@ def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
             heading_node: dict[str, Any] = {
                 "type": "heading",
                 "attrs": {"level": level},
-                "content": _parse_inline_formatting(text),
+                "content": _parse_inline_formatting(text, mention_resolver),
             }
             doc["content"].append(heading_node)
             i += 1
@@ -193,7 +257,9 @@ def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
             while i < len(lines) and lines[i].startswith("> "):
                 quote_lines.append(lines[i][2:])
                 i += 1
-            bq_content = [_make_paragraph(ln) for ln in quote_lines]
+            bq_content = [
+                _make_paragraph(ln, mention_resolver) for ln in quote_lines
+            ]
             doc["content"].append({"type": "blockquote", "content": bq_content})
             continue
 
@@ -202,7 +268,7 @@ def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
             items: list[dict[str, Any]] = []
             while i < len(lines) and re.match(r"^[-*]\s+", lines[i]):
                 item_text = re.sub(r"^[-*]\s+", "", lines[i])
-                items.append(_make_list_item(item_text))
+                items.append(_make_list_item(item_text, mention_resolver))
                 i += 1
             doc["content"].append({"type": "bulletList", "content": items})
             continue
@@ -212,7 +278,7 @@ def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
             items_ol: list[dict[str, Any]] = []
             while i < len(lines) and re.match(r"^\d+\.\s+", lines[i]):
                 item_text = re.sub(r"^\d+\.\s+", "", lines[i])
-                items_ol.append(_make_list_item(item_text))
+                items_ol.append(_make_list_item(item_text, mention_resolver))
                 i += 1
             doc["content"].append({"type": "orderedList", "content": items_ol})
             continue
@@ -238,7 +304,9 @@ def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
                     cell_type = "tableHeader" if idx == 0 else "tableCell"
                     adf_cells = []
                     for cell_text in cells:
-                        content = _parse_inline_formatting(cell_text)
+                        content = _parse_inline_formatting(
+                            cell_text, mention_resolver
+                        )
                         if not content:
                             content = [{"type": "text", "text": ""}]
                         adf_cells.append(
@@ -264,7 +332,7 @@ def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
             continue
 
         # --- Paragraph (default) ---
-        doc["content"].append(_make_paragraph(line))
+        doc["content"].append(_make_paragraph(line, mention_resolver))
         i += 1
 
     # Ensure at least one content node

@@ -240,6 +240,40 @@ class JiraClient:
         _ = self.config.url if hasattr(self, "config") else ""
         return self.preprocessor.clean_jira_text(text)
 
+    def _resolve_mention(self, identifier: str) -> str | None:
+        """Resolve a mention identifier to a Jira Cloud account ID.
+
+        Used by the Markdown → ADF converter to turn ``@[identifier]`` /
+        ``[~identifier]`` tokens into real Jira mentions. The resolution path
+        is display name → email → account ID, delegated to
+        ``_get_account_id`` (provided by ``UsersMixin`` in the composed
+        fetcher). An explicit ``accountid:<id>`` token bypasses lookup.
+
+        Args:
+            identifier: Display name, email, or ``accountid:<id>`` token.
+
+        Returns:
+            The account ID, or ``None`` if it cannot be resolved (the caller
+            then preserves the original mention text verbatim).
+        """
+        identifier = identifier.strip()
+        if not identifier:
+            return None
+        if identifier.startswith("accountid:"):
+            return identifier[len("accountid:") :].strip() or None
+
+        get_account_id = getattr(self, "_get_account_id", None)
+        if get_account_id is None:
+            logger.debug(
+                "Mention resolution unavailable: no _get_account_id on client"
+            )
+            return None
+        try:
+            return get_account_id(identifier)
+        except Exception as e:
+            logger.info(f"Could not resolve mention '{identifier}': {e}")
+            return None
+
     def _markdown_to_jira(self, markdown_text: str) -> str | dict[str, Any]:
         """Convert Markdown to Jira format (ADF for Cloud, wiki markup for Server).
 
@@ -254,7 +288,9 @@ class JiraClient:
 
         if self.config.is_cloud:
             try:
-                return markdown_to_adf(markdown_text)
+                return markdown_to_adf(
+                    markdown_text, mention_resolver=self._resolve_mention
+                )
             except Exception as e:
                 logger.warning(f"Error converting markdown to ADF: {e}")
                 return {
