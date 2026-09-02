@@ -664,3 +664,116 @@ class TestMarkdownToJiraDispatch:
         """Server/DC path with empty string returns empty string."""
         result = server_client._markdown_to_jira("")
         assert result == ""
+
+
+def _find_mentions(adf: dict) -> list[dict]:
+    """Recursively collect all mention nodes in an ADF document."""
+    found: list[dict] = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "mention":
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(adf)
+    return found
+
+
+class TestMarkdownToAdfMentions:
+    """Tests for @mention resolution in markdown_to_adf."""
+
+    def test_at_bracket_mention_resolved(self):
+        """@[Display Name] becomes a mention node when resolvable."""
+        resolver = MagicMock(return_value="557058:abc-123")
+        adf = markdown_to_adf(
+            "Hey @[Jane Doe] please review", mention_resolver=resolver
+        )
+        mentions = _find_mentions(adf)
+        assert len(mentions) == 1
+        assert mentions[0]["attrs"]["id"] == "557058:abc-123"
+        assert mentions[0]["attrs"]["text"] == "@Jane Doe"
+        resolver.assert_called_once_with("Jane Doe")
+
+    def test_tilde_mention_resolved(self):
+        """[~identifier] becomes a mention node when resolvable."""
+        resolver = MagicMock(return_value="557058:xyz")
+        adf = markdown_to_adf(
+            "cc [~jane@example.com] thanks", mention_resolver=resolver
+        )
+        mentions = _find_mentions(adf)
+        assert len(mentions) == 1
+        assert mentions[0]["attrs"]["id"] == "557058:xyz"
+        resolver.assert_called_once_with("jane@example.com")
+
+    def test_mention_unresolved_kept_as_text(self):
+        """Unresolved mention is preserved verbatim, not dropped."""
+        resolver = MagicMock(return_value=None)
+        adf = markdown_to_adf("hi @[Ghost User]", mention_resolver=resolver)
+        assert _find_mentions(adf) == []
+        text_back = adf_to_text(adf) or ""
+        assert "@[Ghost User]" in text_back
+
+    def test_mention_without_resolver_is_literal(self):
+        """With no resolver, mention tokens stay literal text."""
+        adf = markdown_to_adf("hi @[Someone] and [~bob]")
+        assert _find_mentions(adf) == []
+        text_back = adf_to_text(adf) or ""
+        assert "@[Someone]" in text_back
+        assert "[~bob]" in text_back
+
+    def test_accountid_token_bypasses_resolver(self):
+        """An explicit accountid: token needs no lookup but still resolves.
+
+        The bypass lives in _resolve_mention; markdown_to_adf itself just
+        calls whatever resolver it is given. Here we assert the label
+        stripping produces a clean @text.
+        """
+        resolver = MagicMock(return_value="557058:abc")
+        adf = markdown_to_adf(
+            "ping [~accountid:557058:abc]", mention_resolver=resolver
+        )
+        mentions = _find_mentions(adf)
+        assert len(mentions) == 1
+        assert mentions[0]["attrs"]["text"] == "@557058:abc"
+
+
+class TestResolveMention:
+    """Tests for JiraClient._resolve_mention."""
+
+    @pytest.fixture
+    def client(self):
+        with patch("atlassian.Jira"):
+            from mcp_atlassian.jira.client import JiraClient
+
+            client = MagicMock(spec=JiraClient)
+            client._resolve_mention = JiraClient._resolve_mention.__get__(
+                client, JiraClient
+            )
+            return client
+
+    def test_accountid_token_stripped(self, client):
+        """accountid:<id> returns the id directly without a lookup."""
+        client._get_account_id = MagicMock()
+        assert client._resolve_mention("accountid:557058:abc") == "557058:abc"
+        client._get_account_id.assert_not_called()
+
+    def test_display_name_resolved_via_get_account_id(self, client):
+        """A display name is resolved through _get_account_id."""
+        client._get_account_id = MagicMock(return_value="557058:xyz")
+        assert client._resolve_mention("Jane Doe") == "557058:xyz"
+        client._get_account_id.assert_called_once_with("Jane Doe")
+
+    def test_unresolvable_returns_none(self, client):
+        """A lookup failure yields None rather than raising."""
+        client._get_account_id = MagicMock(side_effect=ValueError("nope"))
+        assert client._resolve_mention("Ghost") is None
+
+    def test_empty_identifier_returns_none(self, client):
+        client._get_account_id = MagicMock()
+        assert client._resolve_mention("   ") is None
+        client._get_account_id.assert_not_called()
