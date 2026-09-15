@@ -7,6 +7,8 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+## v0.21.2-peakflames.4
+
 ### Features
 
 - Resolve `@`-mentions when writing Jira Cloud comments/descriptions: the
