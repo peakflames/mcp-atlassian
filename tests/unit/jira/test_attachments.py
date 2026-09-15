@@ -470,12 +470,17 @@ class TestAttachmentsMixin:
     def test_upload_attachment_success(self, attachments_mixin: AttachmentsMixin):
         """Test successful attachment upload."""
         # Mock the Jira API response
-        mock_attachment_response = {
-            "id": "12345",
-            "filename": "test_file.txt",
-            "size": 100,
-        }
-        attachments_mixin.jira.add_attachment.return_value = mock_attachment_response
+        # Jira returns a list of attachment objects from the upload endpoint
+        mock_attachment_response = [
+            {
+                "id": "12345",
+                "filename": "test_file.txt",
+                "size": 100,
+            }
+        ]
+        attachments_mixin.jira.add_attachment_object.return_value = (
+            mock_attachment_response
+        )
 
         # Mock file operations
         with (
@@ -503,19 +508,26 @@ class TestAttachmentsMixin:
             assert result["filename"] == "test_file.txt"
             assert result["size"] == 100
             assert result["id"] == "12345"
-            attachments_mixin.jira.add_attachment.assert_called_once_with(
-                issue_key="TEST-123", filename="/absolute/path/test_file.txt"
-            )
+            # Uploaded via add_attachment_object with the basename (not the
+            # full path) as the multipart filename.
+            attachments_mixin.jira.add_attachment_object.assert_called_once()
+            call_args = attachments_mixin.jira.add_attachment_object.call_args
+            assert call_args.args[0] == "TEST-123"
+            assert call_args.args[1][0] == "test_file.txt"
 
     def test_upload_attachment_relative_path(self, attachments_mixin: AttachmentsMixin):
         """Test attachment upload with a relative path."""
         # Mock the Jira API response
-        mock_attachment_response = {
-            "id": "12345",
-            "filename": "test_file.txt",
-            "size": 100,
-        }
-        attachments_mixin.jira.add_attachment.return_value = mock_attachment_response
+        mock_attachment_response = [
+            {
+                "id": "12345",
+                "filename": "test_file.txt",
+                "size": 100,
+            }
+        ]
+        attachments_mixin.jira.add_attachment_object.return_value = (
+            mock_attachment_response
+        )
 
         # Mock file operations
         with (
@@ -539,9 +551,49 @@ class TestAttachmentsMixin:
             assert result["success"] is True
             mock_isabs.assert_called_once_with("test_file.txt")
             mock_abspath.assert_called_once_with("test_file.txt")
-            attachments_mixin.jira.add_attachment.assert_called_once_with(
-                issue_key="TEST-123", filename="/absolute/path/test_file.txt"
+            attachments_mixin.jira.add_attachment_object.assert_called_once()
+            call_args = attachments_mixin.jira.add_attachment_object.call_args
+            assert call_args.args[0] == "TEST-123"
+            assert call_args.args[1][0] == "test_file.txt"
+
+    def test_upload_attachment_uses_basename_not_full_path(
+        self, attachments_mixin: AttachmentsMixin
+    ):
+        """Regression: the multipart filename must be the basename.
+
+        Previously upload_attachment passed the full absolute path as the
+        Jira attachment filename, so uploads were stored under (or rejected
+        because of) the filesystem path rather than the plain file name.
+        """
+        attachments_mixin.jira.add_attachment_object.return_value = [{"id": "9"}]
+
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("os.path.getsize", return_value=10),
+            patch("os.path.isabs", return_value=True),
+            patch("builtins.open", mock_open(read_data=b"data")),
+        ):
+            result = attachments_mixin.upload_attachment(
+                "TEST-123", "/home/user/reports/q3 report.pdf"
             )
+
+        assert result["success"] is True
+        assert result["filename"] == "q3 report.pdf"
+        call_args = attachments_mixin.jira.add_attachment_object.call_args
+        # Positional: (issue_key, (filename, fileobj))
+        assert call_args.args[0] == "TEST-123"
+        filename_arg = call_args.args[1][0]
+        assert filename_arg == "q3 report.pdf"
+        assert "/" not in filename_arg
+
+    def test_extract_attachment_id_variants(
+        self, attachments_mixin: AttachmentsMixin
+    ):
+        """_extract_attachment_id handles list, dict, and empty responses."""
+        assert attachments_mixin._extract_attachment_id([{"id": "42"}]) == "42"
+        assert attachments_mixin._extract_attachment_id({"id": 7}) == "7"
+        assert attachments_mixin._extract_attachment_id([]) is None
+        assert attachments_mixin._extract_attachment_id(None) is None
 
     def test_upload_attachment_no_issue_key(self, attachments_mixin: AttachmentsMixin):
         """Test attachment upload with no issue key."""
@@ -550,7 +602,7 @@ class TestAttachmentsMixin:
         # Assertions
         assert result["success"] is False
         assert "No issue key provided" in result["error"]
-        attachments_mixin.jira.add_attachment.assert_not_called()
+        attachments_mixin.jira.add_attachment_object.assert_not_called()
 
     def test_upload_attachment_no_file_path(self, attachments_mixin: AttachmentsMixin):
         """Test attachment upload with no file path."""
@@ -559,7 +611,7 @@ class TestAttachmentsMixin:
         # Assertions
         assert result["success"] is False
         assert "No file path provided" in result["error"]
-        attachments_mixin.jira.add_attachment.assert_not_called()
+        attachments_mixin.jira.add_attachment_object.assert_not_called()
 
     def test_upload_attachment_file_not_found(
         self, attachments_mixin: AttachmentsMixin
@@ -583,12 +635,14 @@ class TestAttachmentsMixin:
             # Assertions
             assert result["success"] is False
             assert "File not found" in result["error"]
-            attachments_mixin.jira.add_attachment.assert_not_called()
+            attachments_mixin.jira.add_attachment_object.assert_not_called()
 
     def test_upload_attachment_api_error(self, attachments_mixin: AttachmentsMixin):
         """Test attachment upload with an API error."""
         # Mock the Jira API to raise an exception
-        attachments_mixin.jira.add_attachment.side_effect = Exception("API Error")
+        attachments_mixin.jira.add_attachment_object.side_effect = Exception(
+            "API Error"
+        )
 
         # Mock file operations
         with (
@@ -614,7 +668,7 @@ class TestAttachmentsMixin:
     def test_upload_attachment_no_response(self, attachments_mixin: AttachmentsMixin):
         """Test attachment upload when API returns no response."""
         # Mock the Jira API to return None
-        attachments_mixin.jira.add_attachment.return_value = None
+        attachments_mixin.jira.add_attachment_object.return_value = None
 
         # Mock file operations
         with (

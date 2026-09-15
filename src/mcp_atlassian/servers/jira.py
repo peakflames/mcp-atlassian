@@ -1738,7 +1738,18 @@ async def add_comment(
             pattern=ISSUE_KEY_PATTERN,
         ),
     ],
-    body: Annotated[str, Field(description="Comment text in Markdown format")],
+    body: Annotated[
+        str,
+        Field(
+            description=(
+                "Comment text in Markdown format. To @-mention a user (Jira "
+                "Cloud only), write the mention as @[Identifier] or "
+                "[~Identifier], where Identifier is a display name, an email, "
+                "or accountid:<accountId>. A bare @name is NOT treated as a "
+                "mention; unresolved mentions are left as literal text."
+            )
+        ),
+    ],
     visibility: Annotated[
         str | None,
         Field(
@@ -1799,7 +1810,18 @@ async def edit_comment(
         ),
     ],
     comment_id: Annotated[str, Field(description="The ID of the comment to edit")],
-    body: Annotated[str, Field(description="Updated comment text in Markdown format")],
+    body: Annotated[
+        str,
+        Field(
+            description=(
+                "Updated comment text in Markdown format. To @-mention a user "
+                "(Jira Cloud only), write @[Identifier] or [~Identifier], "
+                "where Identifier is a display name, an email, or "
+                "accountid:<accountId>. A bare @name is NOT a mention; "
+                "unresolved mentions are left as literal text."
+            )
+        ),
+    ],
     visibility: Annotated[
         str | None,
         Field(

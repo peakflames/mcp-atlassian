@@ -350,6 +350,28 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
             "failed": failed,
         }
 
+    @staticmethod
+    def _extract_attachment_id(attachment: Any) -> str | None:
+        """Extract the attachment ID from a Jira upload response.
+
+        The Jira attachments endpoint returns a JSON array of attachment
+        objects, but some client/API-version combinations return a single
+        object. Handle both shapes.
+
+        Args:
+            attachment: The value returned by add_attachment_object.
+
+        Returns:
+            The attachment ID as a string, or None if not present.
+        """
+        item: Any = attachment
+        if isinstance(attachment, list):
+            item = attachment[0] if attachment else None
+        if isinstance(item, dict):
+            att_id = item.get("id")
+            return str(att_id) if att_id is not None else None
+        return None
+
     def upload_attachment(self, issue_key: str, file_path: str) -> dict[str, Any]:
         """
         Upload a single attachment to a Jira issue.
@@ -381,11 +403,16 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
 
             logger.info(f"Uploading attachment from {file_path} to issue {issue_key}")
 
-            # Use the Jira API to upload the file
+            # Upload the file. We pass the OPEN file handle together with the
+            # basename as a (filename, fileobj) tuple via add_attachment_object.
+            # The previous implementation passed the full path as `filename`,
+            # which caused the upload to be stored under the absolute path (or
+            # rejected outright) rather than the plain file name, and opened
+            # the file only to discard the handle.
             filename = os.path.basename(file_path)
             with open(file_path, "rb") as file:
-                attachment = self.jira.add_attachment(
-                    issue_key=issue_key, filename=file_path
+                attachment = self.jira.add_attachment_object(
+                    issue_key, (filename, file)
                 )
 
             if attachment:
@@ -398,9 +425,7 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
                     "issue_key": issue_key,
                     "filename": filename,
                     "size": file_size,
-                    "id": attachment.get("id")
-                    if isinstance(attachment, dict)
-                    else None,
+                    "id": self._extract_attachment_id(attachment),
                 }
             else:
                 logger.error(f"Failed to upload attachment {filename} to {issue_key}")

@@ -5,6 +5,28 @@ Fork tags follow the pattern `vX.Y.Z-peakflames.N` and publish Docker images
 to `peakflames/mcp-atlassian` (see `.github/workflows/docker-publish.yml`).
 Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
+## Unreleased
+
+### Features
+
+- Resolve `@`-mentions when writing Jira Cloud comments/descriptions: the
+  Markdown → ADF converter now turns `@[Display Name]` and `[~identifier]`
+  tokens into real ADF `mention` nodes, resolving the identifier via
+  display name → email → account ID (`_get_account_id`). An explicit
+  `[~accountid:<id>]` token bypasses lookup. Unresolved mentions are left
+  as literal text rather than producing a broken tag
+  (`src/mcp_atlassian/models/jira/adf.py`, `src/mcp_atlassian/jira/client.py`).
+
+### Fixes
+
+- Fix Jira attachment upload: `upload_attachment` now uploads via
+  `add_attachment_object` using the open file handle and the file's
+  basename as the multipart filename. Previously it passed the full
+  absolute path as the filename (and discarded a redundantly opened
+  handle), so uploads were stored under the filesystem path or rejected.
+  The real attachment ID is now extracted from the array response
+  (`src/mcp_atlassian/jira/attachments.py`).
+
 ## v0.21.2-peakflames.3
 
 ### Features
