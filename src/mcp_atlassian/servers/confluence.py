@@ -207,6 +207,9 @@ async def get_page(
                 page_id_str, convert_to_markdown=convert_to_markdown
             )
         except Exception as e:
+            embed_info = confluence_fetcher.get_embed_info(str(page_id))
+            if embed_info:
+                return json.dumps(embed_info, indent=2, ensure_ascii=False)
             logger.error(f"Error fetching page by ID '{page_id}': {e}")
             return json.dumps(
                 {"error": f"Failed to retrieve page by ID '{page_id}': {e}"},
@@ -1626,7 +1629,9 @@ async def download_attachment(
                 ),
             )
 
-        download_url = resolve_relative_url(download_url, confluence_fetcher.config.url)
+        download_url = resolve_relative_url(
+            download_url, confluence_fetcher._attachment_base_url()
+        )
 
         filename = attachment_data.get("title") or attachment_id
         mime_type = (
@@ -1815,7 +1820,7 @@ async def download_content_attachments(
             continue
 
         download_url = resolve_relative_url(
-            attachment.download_url, confluence_fetcher.config.url
+            attachment.download_url, confluence_fetcher._attachment_base_url()
         )
 
         encoded, mime_type, fetched_bytes = fetch_and_encode_attachment(
@@ -2028,7 +2033,9 @@ async def get_page_images(
             failed.append({"filename": filename, "error": "No download URL"})
             continue
 
-        download_url = resolve_relative_url(download_url, confluence_fetcher.config.url)
+        download_url = resolve_relative_url(
+            download_url, confluence_fetcher._attachment_base_url()
+        )
 
         encoded, _, fetched_bytes = fetch_and_encode_attachment(
             fetch_fn=confluence_fetcher.fetch_attachment_content,

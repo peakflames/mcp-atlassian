@@ -2,6 +2,7 @@
 
 import logging
 import os
+from typing import Any
 
 from atlassian import Confluence
 from requests import Session
@@ -12,6 +13,7 @@ from ..utils.logging import get_masked_session_headers, log_config_param, mask_s
 from ..utils.oauth import configure_oauth_session
 from ..utils.ssl import configure_ssl_verification
 from .config import ConfluenceConfig
+from .v2_adapter import ConfluenceV2Adapter
 
 # Configure logging
 logger = logging.getLogger("mcp-atlassian")
@@ -159,6 +161,67 @@ class ConfluenceClient:
                     "Authentication validation failed during client initialization - "
                     "continuing anyway"
                 )
+
+    def _uses_oauth_gateway(self) -> bool:
+        """Whether requests go through the Atlassian API gateway (Cloud OAuth)."""
+        return self.config.auth_type == "oauth" and self.config.is_cloud
+
+    def _attachment_base_url(self) -> str:
+        """Return the base URL for resolving relative attachment download links.
+
+        Cloud OAuth tokens are only accepted by the Atlassian API gateway stored
+        on the underlying client, not by the site URL in ``config.url``. The
+        gateway serves Confluence REST paths under the ``/wiki`` prefix.
+
+        Returns:
+            Base URL to prepend to relative ``_links.download`` values.
+        """
+        if self._uses_oauth_gateway():
+            base_url = self.confluence.url.rstrip("/")
+            if not base_url.endswith("/wiki"):
+                base_url = f"{base_url}/wiki"
+            return base_url
+        return self.config.url
+
+    def get_embed_info(self, content_id: str) -> dict[str, Any] | None:
+        """Describe a Smart Link embed, if ``content_id`` is one.
+
+        Only available for Cloud OAuth, where content is read via the v2 API.
+
+        Args:
+            content_id: The content ID that failed to resolve as a page
+
+        Returns:
+            Error payload describing the embed and its external URL, or None
+            if the ID is not an embed or cannot be looked up.
+        """
+        if not content_id or content_id.startswith("att"):
+            return None
+        if not self._uses_oauth_gateway():
+            return None
+
+        adapter = ConfluenceV2Adapter(
+            session=self.confluence._session, base_url=self.confluence.url
+        )
+        embed = adapter.get_embed(content_id)
+        if not embed:
+            return None
+
+        return {
+            "success": False,
+            "content_id": content_id,
+            "content_type": "embed",
+            "title": embed.get("title"),
+            "embed_url": embed.get("embedUrl"),
+            "parent_id": embed.get("parentId"),
+            "parent_type": embed.get("parentType"),
+            "error": (
+                f"Content '{content_id}' is a Smart Link embed, not a page. It has "
+                "no page body or attachments; the linked resource lives at "
+                "embed_url outside Confluence and cannot be fetched with "
+                "Confluence credentials."
+            ),
+        }
 
     def _validate_authentication(self) -> None:
         """Validate authentication by making a simple API call."""

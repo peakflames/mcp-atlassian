@@ -323,7 +323,7 @@ class AttachmentsMixin(ConfluenceClient, AttachmentsOperationsProto):
 
             # Prepend base URL if download URL is relative
             download_url = resolve_relative_url(
-                attachment.download_url, self.config.url
+                attachment.download_url, self._attachment_base_url()
             )
 
             # Download the attachment
@@ -436,6 +436,9 @@ class AttachmentsMixin(ConfluenceClient, AttachmentsOperationsProto):
             }
 
         except Exception as e:
+            embed_info = self.get_embed_info(content_id)
+            if embed_info:
+                return embed_info
             error_msg = str(e)
             logger.error(f"Error getting attachments: {error_msg}")
             return {"success": False, "error": error_msg}

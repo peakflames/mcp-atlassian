@@ -4,6 +4,7 @@ import logging
 
 from ..models.confluence import ConfluenceLabel
 from .client import ConfluenceClient
+from .v2_adapter import ConfluenceV2Adapter
 
 logger = logging.getLogger("mcp-atlassian")
 
@@ -25,8 +26,16 @@ class LabelsMixin(ConfluenceClient):
             Exception: If there is an error getting the label
         """
         try:
-            # Get labels with expanded content
-            labels_response = self.confluence.get_page_labels(page_id=page_id)
+            if self._uses_oauth_gateway():
+                # The v1 label endpoint is no longer served through the OAuth
+                # API gateway; read labels via the v2 API instead.
+                v2_adapter = ConfluenceV2Adapter(
+                    session=self.confluence._session, base_url=self.confluence.url
+                )
+                labels_response = v2_adapter.get_content_labels(page_id)
+            else:
+                # Get labels with expanded content
+                labels_response = self.confluence.get_page_labels(page_id=page_id)
 
             # Process each label
             label_models = []
@@ -42,6 +51,10 @@ class LabelsMixin(ConfluenceClient):
             return label_models
 
         except Exception as e:
+            embed_info = self.get_embed_info(page_id)
+            if embed_info:
+                msg = f"{embed_info['error']} embed_url: {embed_info['embed_url']}"
+                raise Exception(msg) from e
             logger.error(f"Failed fetching labels from page {page_id}: {str(e)}")
             raise Exception(
                 f"Failed fetching labels from page {page_id}: {str(e)}"

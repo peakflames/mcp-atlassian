@@ -6,6 +6,7 @@ but still work for API token authentication.
 """
 
 import logging
+import urllib.parse
 from typing import Any
 
 import requests
@@ -1128,3 +1129,122 @@ class ConfluenceV2Adapter:
             "version": v2_attachment.get("version", {}),
             "_links": v2_attachment.get("_links", {}),
         }
+
+    def get_embed(self, embed_id: str) -> dict[str, Any] | None:
+        """Get a Smart Link embed (content type ``embed``) using v2 API.
+
+        Embeds live in the content tree alongside pages and folders but point
+        at an external URL (``embedUrl``). They have no body and no attachments,
+        so page and attachment endpoints return 404 for them.
+
+        Args:
+            embed_id: The content ID to look up
+
+        Returns:
+            The v2 embed object, or None if the ID is not an embed or cannot
+            be read (e.g. the token lacks the ``read:embed:confluence`` scope).
+        """
+        url = f"{self.base_url}/api/v2/embeds/{embed_id}"
+        try:
+            response = self.session.get(url)
+        except requests.RequestException as e:
+            logger.debug(f"Embed lookup for '{embed_id}' failed: {e}")
+            return None
+
+        if response.status_code == 200:
+            return response.json()
+        if response.status_code in (401, 403):
+            logger.warning(
+                f"Could not read embed '{embed_id}' (HTTP {response.status_code}); "
+                "the OAuth app may be missing the read:embed:confluence scope"
+            )
+        return None
+
+    def get_content_labels(self, content_id: str) -> dict[str, Any]:
+        """Get labels for a page, blog post, or attachment using v2 API.
+
+        The v1 ``/rest/api/content/{id}/label`` endpoint is no longer served
+        through the OAuth API gateway. Attachment IDs (``att`` prefix) use the
+        attachments endpoint; other IDs try pages first, then blog posts.
+
+        Args:
+            content_id: The content ID
+
+        Returns:
+            v1-compatible dictionary with a ``results`` list of labels
+
+        Raises:
+            HTTPError: If the API request fails with 401/403
+            ValueError: If the content is not found or other errors
+        """
+        if content_id.startswith("att"):
+            content_types = ["attachments"]
+        else:
+            content_types = ["pages", "blogposts"]
+
+        for index, content_type in enumerate(content_types):
+            url = f"{self.base_url}/api/v2/{content_type}/{content_id}/labels"
+            try:
+                labels = self._get_all_results(url)
+            except HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status in (401, 403):
+                    logger.error(
+                        f"Authentication error getting labels for '{content_id}': {e}"
+                    )
+                    raise
+                if status == 404 and index < len(content_types) - 1:
+                    continue
+                msg = f"Failed to get labels for content '{content_id}': {e}"
+                raise ValueError(msg) from e
+            except Exception as e:
+                msg = f"Failed to get labels for content '{content_id}': {e}"
+                raise ValueError(msg) from e
+
+            return {
+                "results": [
+                    {
+                        "id": label.get("id"),
+                        "name": label.get("name"),
+                        "prefix": label.get("prefix", "global"),
+                        "label": label.get("name"),
+                    }
+                    for label in labels
+                ]
+            }
+
+        return {"results": []}
+
+    def _get_all_results(
+        self, url: str, limit: int = 250, max_pages: int = 20
+    ) -> list[dict[str, Any]]:
+        """Collect ``results`` from a cursor-paginated v2 list endpoint.
+
+        Args:
+            url: The v2 list endpoint URL
+            limit: Page size to request
+            max_pages: Safety cap on the number of pages fetched
+
+        Returns:
+            Combined list of result objects
+
+        Raises:
+            HTTPError: If any request fails
+        """
+        results: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"limit": limit}
+        for _ in range(max_pages):
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            results.extend(data.get("results", []))
+
+            next_link = data.get("_links", {}).get("next")
+            if not next_link:
+                break
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(next_link).query)
+            cursor = query.get("cursor", [None])[0]
+            if not cursor:
+                break
+            params = {"limit": limit, "cursor": cursor}
+        return results
