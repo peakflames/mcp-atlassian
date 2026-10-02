@@ -7,6 +7,35 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+## v0.21.2-peakflames.5
+
+### Fixes
+
+- Fix Confluence attachment downloads under Cloud OAuth: relative
+  `_links.download` values are now resolved against the Atlassian API gateway
+  (plus `/wiki`) instead of the site URL, which rejects OAuth bearer tokens.
+  Affects `confluence_download_attachment`,
+  `confluence_download_content_attachments`, and `confluence_get_page_images`
+  (`src/mcp_atlassian/confluence/client.py`,
+  `src/mcp_atlassian/servers/confluence.py`,
+  `src/mcp_atlassian/confluence/attachments.py`). Adapted from upstream #1580.
+- Fix `confluence_get_labels` under Cloud OAuth: labels are read via the v2
+  `pages` / `blogposts` / `attachments` label endpoints, because the v1
+  `/rest/api/content/{id}/label` endpoint is no longer served through the
+  gateway (upstream #1598) (`src/mcp_atlassian/confluence/labels.py`,
+  `src/mcp_atlassian/confluence/v2_adapter.py`).
+- Report Smart Link embeds instead of a bare 404: when a page or attachment
+  lookup fails under Cloud OAuth, the content ID is checked against
+  `/api/v2/embeds/{id}` and the embed's title and `embedUrl` are returned.
+  Requires the `read:embed:confluence` scope; without it the original error is
+  returned (`src/mcp_atlassian/confluence/client.py`).
+- Replace a site-specific cloud ID in docs and tests with a placeholder.
+
+### Known limitations
+
+- `confluence_add_label` still uses the v1 POST endpoint and fails under Cloud
+  OAuth; v2 has no label-create endpoint.
+
 ## v0.21.2-peakflames.4
 
 ### Features
