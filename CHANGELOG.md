@@ -39,6 +39,10 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 - Space keys are compared against `CONFLUENCE_SPACES_BLOCKED` and
   `CONFLUENCE_SPACES_READONLY` ignoring case and surrounding whitespace, the
   same way the lists themselves are read.
+- `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY` now apply to
+  requests authenticated with the `X-Atlassian-Confluence-Url` and
+  `X-Atlassian-Confluence-Personal-Token` headers. The write-access check on
+  page-ID tools now also checks the server's lists directly.
 
 ### Behaviour changes
 
@@ -50,6 +54,9 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 ### Notes
 
 - With no space lists configured, these checks make no extra requests.
+- The space lists come from the server's own Confluence configuration. A
+  server with no global Confluence configuration, used only with
+  header-based credentials, has no lists to enforce.
 - With a block list set, a request is denied when the content's space cannot
   be determined. The error names `CONFLUENCE_SPACES_BLOCKED`.
 - Under Cloud OAuth, the space check needs the `read:space:confluence` scope
