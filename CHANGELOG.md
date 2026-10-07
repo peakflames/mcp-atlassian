@@ -18,17 +18,24 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
   `confluence_download_content_attachments`, and `confluence_get_page_images`
   (`src/mcp_atlassian/confluence/client.py`,
   `src/mcp_atlassian/servers/confluence.py`,
-  `src/mcp_atlassian/confluence/attachments.py`). Adapted from upstream #1580.
+  `src/mcp_atlassian/confluence/attachments.py`). Same gateway approach as
+  upstream #1580, but the `/download/attachments/...` path is kept rather than
+  rewritten to the v1 `/rest/api/content/.../download` endpoint, because the
+  gateway is removing v1 content endpoints (upstream #1598).
 - Fix `confluence_get_labels` under Cloud OAuth: labels are read via the v2
   `pages` / `blogposts` / `attachments` label endpoints, because the v1
   `/rest/api/content/{id}/label` endpoint is no longer served through the
   gateway (upstream #1598) (`src/mcp_atlassian/confluence/labels.py`,
-  `src/mcp_atlassian/confluence/v2_adapter.py`).
+  `src/mcp_atlassian/confluence/v2_adapter.py`). Requires the
+  `read:label:confluence` scope; OAuth apps with only classic scopes get a 401.
 - Report Smart Link embeds instead of a bare 404: when a page or attachment
-  lookup fails under Cloud OAuth, the content ID is checked against
+  lookup returns 404 under Cloud OAuth, the content ID is checked against
   `/api/v2/embeds/{id}` and the embed's title and `embedUrl` are returned.
-  Requires the `read:embed:confluence` scope; without it the original error is
-  returned (`src/mcp_atlassian/confluence/client.py`).
+  Embeds in a space listed in `CONFLUENCE_SPACES_BLOCKED` are not reported; if
+  a block list is set and the embed's space cannot be resolved, the original
+  error is returned. Requires the `read:embed:confluence` scope, plus
+  `read:space:confluence` when a block list is set; without them the original
+  error is returned (`src/mcp_atlassian/confluence/client.py`).
 - Replace a site-specific cloud ID in docs and tests with a placeholder.
 
 ### Known limitations
