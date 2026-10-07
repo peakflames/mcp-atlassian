@@ -16,6 +16,13 @@ from .utils import emoji_to_hex_id, extract_emoji_from_property
 
 logger = logging.getLogger("mcp-atlassian")
 
+# Largest ``limit`` the v2 list endpoints accept.
+V2_MAX_PAGE_SIZE = 250
+
+
+class ChildListTruncatedError(ValueError):
+    """Raised when a child listing hits the request cap before it completes."""
+
 
 class ConfluenceV2Adapter:
     """Adapter for Confluence REST API v2 operations when using OAuth."""
@@ -1252,10 +1259,12 @@ class ConfluenceV2Adapter:
 
         The children endpoint returns only ``id``, ``status``, ``title``,
         ``type``, ``spaceId`` and ``childPosition``. When ``include_version``
-        or ``include_body`` is set, child pages are looked up in one batch via
-        ``/api/v2/pages?id=...`` to add ``version`` and ``body.storage``.
-        Folders have no body and the batch lookup does not cover them, so
-        folders never carry a version or body on this path.
+        or ``include_body`` is set, child pages are looked up in batches of
+        up to 250 via ``/api/v2/pages?id=...`` to add ``version`` and
+        ``body.storage``. Folders have no body and the batch lookup does not
+        cover them, so folders never carry a version or body on this path.
+        A failed space lookup only drops the ``space`` field (logged as a
+        warning); it does not fail the listing.
 
         Args:
             page_id: The ID of the parent page
@@ -1271,22 +1280,29 @@ class ConfluenceV2Adapter:
 
         Raises:
             HTTPError: If the API request fails with 401/403
-            ValueError: If the parent is not found or other errors
+            ChildListTruncatedError: If ``max_pages`` requests did not reach
+                the end of the list or ``start + limit`` matching items
+            ValueError: If the parent is not found or other errors. The
+                message never contains the request URL.
         """
         if limit <= 0:
             return []
         wanted_types = {"page", "folder"} if include_folders else {"page"}
         url = f"{self.base_url}/api/v2/pages/{page_id}/direct-children"
-        page_size = max(1, min(250, start + limit))
         try:
             children: list[dict[str, Any]] = []
             skipped = 0
-            params: dict[str, Any] = {"limit": page_size}
+            scanned = 0
+            # Always request the v2 maximum so that skipping ``start`` items
+            # and filtering out other content types cannot exhaust
+            # ``max_pages`` early.
+            params: dict[str, Any] = {"limit": V2_MAX_PAGE_SIZE}
             for _ in range(max_pages):
                 response = self.session.get(url, params=params)
                 response.raise_for_status()
                 data = response.json()
                 for item in data.get("results", []):
+                    scanned += 1
                     if item.get("type") not in wanted_types:
                         continue
                     if skipped < start:
@@ -1305,18 +1321,28 @@ class ConfluenceV2Adapter:
                 cursor = query.get("cursor", [None])[0]
                 if not cursor:
                     break
-                params = {"limit": page_size, "cursor": cursor}
+                params = {"limit": V2_MAX_PAGE_SIZE, "cursor": cursor}
             else:
-                logger.warning(
-                    f"Stopped after {max_pages} pages ({len(children)} results) "
-                    f"listing children of page '{page_id}'; remaining results "
-                    "were not fetched"
+                # Returning what was collected would look like a complete
+                # (possibly empty) list of children.
+                msg = (
+                    f"Could not list children of page '{page_id}': stopped after "
+                    f"{max_pages} requests ({scanned} child items scanned) before "
+                    f"finding {start + limit} matching items"
                 )
+                raise ChildListTruncatedError(msg)
 
             details: dict[str, dict[str, Any]] = {}
             page_ids = [str(c["id"]) for c in children if c.get("type") == "page"]
             if page_ids and (include_version or include_body):
                 details = self._get_pages_by_id(page_ids, include_body=include_body)
+                missing = [pid for pid in page_ids if pid not in details]
+                if missing:
+                    logger.warning(
+                        f"{len(missing)} child page(s) of page '{page_id}' were "
+                        "not returned by the page lookup; they are listed "
+                        "without version or body"
+                    )
 
             spaces: dict[str, dict[str, Any] | None] = {}
             converted = []
@@ -1341,43 +1367,56 @@ class ConfluenceV2Adapter:
             )
             return converted
 
+        except ChildListTruncatedError:
+            logger.error(f"Truncated child listing for page '{page_id}'")
+            raise
         except HTTPError as e:
-            if e.response is not None and e.response.status_code in [401, 403]:
+            # Error strings returned to clients must not contain request URLs:
+            # under OAuth they include the gateway path with the cloud ID.
+            # The full error is logged instead.
+            status = e.response.status_code if e.response is not None else None
+            if status in (401, 403):
                 logger.error(
                     f"Authentication error getting children of page '{page_id}': {e}"
                 )
                 raise
             logger.warning(f"HTTP error getting children of page '{page_id}': {e}")
-            msg = f"Failed to get children of page '{page_id}': {e}"
+            if status == 404:
+                msg = f"Page not found or not accessible: {page_id}"
+            else:
+                msg = f"Failed to get children of page '{page_id}': HTTP {status}"
             raise ValueError(msg) from e
         except Exception as e:
             logger.error(f"Error getting children of page '{page_id}': {e}")
-            msg = f"Failed to get children of page '{page_id}': {e}"
+            msg = f"Failed to get children of page '{page_id}': {type(e).__name__}"
             raise ValueError(msg) from e
 
     def _get_pages_by_id(
         self, page_ids: list[str], *, include_body: bool
     ) -> dict[str, dict[str, Any]]:
-        """Look up several pages in one ``/api/v2/pages`` request.
+        """Look up pages via ``/api/v2/pages?id=...``, 250 IDs per request.
 
         Args:
-            page_ids: Page IDs to look up (at most 250)
+            page_ids: Page IDs to look up
             include_body: Whether to request the storage body
 
         Returns:
             Mapping of page ID to the v2 page object
 
         Raises:
-            HTTPError: If the request fails
+            HTTPError: If a request fails
         """
-        params: dict[str, Any] = {"id": page_ids, "limit": len(page_ids)}
-        if include_body:
-            params["body-format"] = "storage"
-        response = self.session.get(f"{self.base_url}/api/v2/pages", params=params)
-        response.raise_for_status()
-        return {
-            str(page.get("id")): page for page in response.json().get("results", [])
-        }
+        details: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(page_ids), V2_MAX_PAGE_SIZE):
+            chunk = page_ids[offset : offset + V2_MAX_PAGE_SIZE]
+            params: dict[str, Any] = {"id": chunk, "limit": len(chunk)}
+            if include_body:
+                params["body-format"] = "storage"
+            response = self.session.get(f"{self.base_url}/api/v2/pages", params=params)
+            response.raise_for_status()
+            for page in response.json().get("results", []):
+                details[str(page.get("id"))] = page
+        return details
 
     def _get_space_summary(self, space_id: str) -> dict[str, Any] | None:
         """Get a space's ID, key and name, or None if it cannot be read."""

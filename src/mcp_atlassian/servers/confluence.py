@@ -345,6 +345,11 @@ async def get_page_children(
             "error": "Authentication failed. Please check your credentials.",
             "details": str(e),
         }
+    except ValueError as e:
+        logger.error(
+            f"Error getting children for page ID {parent_id}: {e}", exc_info=True
+        )
+        result = {"error": str(e), "parent_id": parent_id}
     except Exception as e:
         logger.error(
             f"Error getting/processing children for page ID {parent_id}: {e}",

@@ -15,7 +15,10 @@ from mcp_atlassian.confluence.attachments import AttachmentsMixin
 from mcp_atlassian.confluence.client import ConfluenceClient
 from mcp_atlassian.confluence.labels import LabelsMixin
 from mcp_atlassian.confluence.pages import PagesMixin
-from mcp_atlassian.confluence.v2_adapter import ConfluenceV2Adapter
+from mcp_atlassian.confluence.v2_adapter import (
+    ChildListTruncatedError,
+    ConfluenceV2Adapter,
+)
 from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.utils.urls import resolve_relative_url
 
@@ -514,12 +517,14 @@ SPACE = {"id": "555", "key": "ENG", "name": "Engineering"}
 def _route(routes: dict[str, Any]) -> Any:
     """Build a session.get side effect that answers by URL (and cursor)."""
 
-    def get(url: str, params: dict[str, Any] | None = None, **_: Any) -> Mock:
+    def get(url: str, params: dict[str, Any] | None = None, **_: Any) -> Any:
         key = url
         if params and params.get("cursor"):
             key = f"{url}#cursor={params['cursor']}"
         value = routes[key]
-        return value if isinstance(value, Mock) else _response(200, value)
+        if isinstance(value, Mock | requests.Response):
+            return value
+        return _response(200, value)
 
     return get
 
@@ -531,6 +536,61 @@ def _v2_routes() -> dict[str, Any]:
         f"{GATEWAY_URL}/api/v2/pages": PAGE_DETAILS,
         f"{GATEWAY_URL}/api/v2/spaces/555": SPACE,
     }
+
+
+def _child(child_id: str, child_type: str) -> dict[str, Any]:
+    return {
+        "id": child_id,
+        "status": "current",
+        "title": f"Item {child_id}",
+        "type": child_type,
+        "spaceId": "555",
+    }
+
+
+def _paged_children(items: list[dict[str, Any]]) -> Any:
+    """Fake v2 session.get that pages ``items`` by the requested limit."""
+
+    def get(url: str, params: dict[str, Any] | None = None, **_: Any) -> Mock:
+        params = params or {}
+        if url == CHILDREN_URL:
+            offset = int(params.get("cursor") or 0)
+            size = int(params["limit"])
+            payload: dict[str, Any] = {
+                "results": items[offset : offset + size],
+                "_links": {},
+            }
+            if offset + size < len(items):
+                payload["_links"]["next"] = (
+                    "/wiki/api/v2/pages/123/direct-children"
+                    f"?limit={size}&cursor={offset + size}"
+                )
+            return _response(200, payload)
+        if url == f"{GATEWAY_URL}/api/v2/pages":
+            return _response(
+                200,
+                {
+                    "results": [
+                        {"id": i, "version": {"number": 1}} for i in params["id"]
+                    ]
+                },
+            )
+        if url == f"{GATEWAY_URL}/api/v2/spaces/555":
+            return _response(200, SPACE)
+        msg = f"unexpected request: {url}"
+        raise AssertionError(msg)
+
+    return get
+
+
+def _url_error_response(status_code: int, url: str) -> requests.Response:
+    """A real response whose raise_for_status message includes the URL."""
+    response = requests.Response()
+    response.status_code = status_code
+    response.url = url
+    response.reason = "Error"
+    response._content = b"{}"
+    return response
 
 
 class TestPageChildrenV2:
@@ -561,9 +621,9 @@ class TestPageChildrenV2:
 
         calls = session.get.call_args_list
         assert calls[0].args[0] == CHILDREN_URL
-        assert calls[0].kwargs["params"] == {"limit": 10}
+        assert calls[0].kwargs["params"] == {"limit": 250}
         assert calls[1].args[0] == CHILDREN_URL
-        assert calls[1].kwargs["params"] == {"limit": 10, "cursor": "abc"}
+        assert calls[1].kwargs["params"] == {"limit": 250, "cursor": "abc"}
         assert calls[2].args[0] == f"{GATEWAY_URL}/api/v2/pages"
         assert calls[2].kwargs["params"] == {"id": ["201", "204"], "limit": 2}
         assert calls[3].args[0] == f"{GATEWAY_URL}/api/v2/spaces/555"
@@ -573,8 +633,10 @@ class TestPageChildrenV2:
         mixin = _mixin(PagesMixin)
         mixin.confluence._session.get.side_effect = _route(_v2_routes())
 
-        child = mixin.get_page_children("123", limit=1)[0].to_simplified_dict()
+        children = mixin.get_page_children("123", limit=1)
 
+        assert len(children) == 1
+        child = children[0].to_simplified_dict()
         assert child == {
             "id": "201",
             "title": "Child A",
@@ -598,7 +660,8 @@ class TestPageChildrenV2:
         # The limit was reached on the first list page: no cursor request.
         urls = [call.args[0] for call in session.get.call_args_list]
         assert urls.count(CHILDREN_URL) == 1
-        assert session.get.call_args_list[0].kwargs["params"] == {"limit": 2}
+        # The list page size does not depend on start/limit.
+        assert session.get.call_args_list[0].kwargs["params"] == {"limit": 250}
 
     def test_include_folders_false_returns_pages_only(self) -> None:
         mixin = _mixin(PagesMixin)
@@ -637,14 +700,103 @@ class TestPageChildrenV2:
         assert f"{GATEWAY_URL}/api/v2/pages" not in urls
         assert all(c.version is None for c in children)
 
-    def test_not_found_raises(self) -> None:
+    def test_not_found_raises_clean_message(self) -> None:
         mixin = _mixin(PagesMixin)
         mixin.confluence._session.get.side_effect = _route(
-            {CHILDREN_URL: _response(404)}
+            {CHILDREN_URL: _url_error_response(404, CHILDREN_URL)}
         )
 
-        with pytest.raises(Exception, match="Failed to get children of page '123'"):
+        with pytest.raises(ValueError) as excinfo:
             mixin.get_page_children("123")
+
+        assert str(excinfo.value) == "Page not found or not accessible: 123"
+
+    def test_http_error_message_omits_gateway_url(self) -> None:
+        mixin = _mixin(PagesMixin)
+        mixin.confluence._session.get.side_effect = _route(
+            {CHILDREN_URL: _url_error_response(500, CHILDREN_URL)}
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            mixin.get_page_children("123")
+
+        message = str(excinfo.value)
+        assert message == "Failed to get children of page '123': HTTP 500"
+        assert "api.atlassian.com" not in message
+        assert "test-cloud-id" not in message
+
+    def test_limit_caps_items_within_one_list_page(self) -> None:
+        items = [_child(str(300 + i), "page") for i in range(5)]
+        mixin = _mixin(PagesMixin)
+        mixin.confluence._session.get.side_effect = _paged_children(items)
+
+        children = mixin.get_page_children("123", limit=3)
+
+        assert [c.id for c in children] == ["300", "301", "302"]
+
+    def test_finds_page_behind_many_skipped_folders(self) -> None:
+        items = [_child(str(400 + i), "folder") for i in range(25)]
+        items.append(_child("500", "page"))
+        mixin = _mixin(PagesMixin)
+        session = mixin.confluence._session
+        session.get.side_effect = _paged_children(items)
+
+        children = mixin.get_page_children("123", limit=1, include_folders=False)
+
+        assert [c.id for c in children] == ["500"]
+        urls = [call.args[0] for call in session.get.call_args_list]
+        assert urls.count(CHILDREN_URL) == 1
+
+    def test_request_cap_raises_instead_of_partial_result(self) -> None:
+        items = [_child(str(1000 + i), "folder") for i in range(600)]
+        items.append(_child("2000", "page"))
+        adapter = ConfluenceV2Adapter(
+            session=MagicMock(spec=requests.Session), base_url=GATEWAY_URL
+        )
+        adapter.session.get.side_effect = _paged_children(items)
+
+        with pytest.raises(ChildListTruncatedError, match="stopped after 2 requests"):
+            adapter.get_page_children(
+                "123", limit=1, include_folders=False, max_pages=2
+            )
+
+        assert adapter.session.get.call_count == 2
+
+    def test_page_lookup_is_chunked_at_250_ids(self) -> None:
+        items = [_child(str(3000 + i), "page") for i in range(300)]
+        adapter = ConfluenceV2Adapter(
+            session=MagicMock(spec=requests.Session), base_url=GATEWAY_URL
+        )
+        adapter.session.get.side_effect = _paged_children(items)
+
+        children = adapter.get_page_children("123", limit=300)
+
+        assert len(children) == 300
+        assert all(c["version"]["number"] == 1 for c in children)
+        lookups = [
+            call.kwargs["params"]
+            for call in adapter.session.get.call_args_list
+            if call.args[0] == f"{GATEWAY_URL}/api/v2/pages"
+        ]
+        assert [len(p["id"]) for p in lookups] == [250, 50]
+        assert [p["limit"] for p in lookups] == [250, 50]
+
+    def test_warns_when_page_lookup_omits_ids(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mixin = _mixin(PagesMixin)
+        routes = _v2_routes()
+        routes[f"{GATEWAY_URL}/api/v2/pages"] = {
+            "results": [PAGE_DETAILS["results"][0]]
+        }
+        mixin.confluence._session.get.side_effect = _route(routes)
+
+        with caplog.at_level(logging.WARNING, logger="mcp-atlassian"):
+            children = mixin.get_page_children("123", include_folders=False)
+
+        assert [c.id for c in children] == ["201", "204"]
+        assert children[1].version is None
+        assert "1 child page(s) of page '123' were not returned" in caplog.text
 
     def test_auth_error_raises_authentication_error(self) -> None:
         mixin = _mixin(PagesMixin)
@@ -661,7 +813,7 @@ class TestPageChildrenV2:
         routes[f"{GATEWAY_URL}/api/v2/pages"] = _response(500)
         mixin.confluence._session.get.side_effect = _route(routes)
 
-        with pytest.raises(Exception, match="Failed to get children of page '123'"):
+        with pytest.raises(ValueError, match="Failed to get children of page '123'"):
             mixin.get_page_children("123")
 
 

@@ -766,6 +766,8 @@ class PagesMixin(ConfluenceClient):
         Raises:
             MCPAtlassianAuthenticationError: If authentication fails (401/403)
             HTTPError: If the v1 API request fails with another HTTP error
+            ValueError: If the v2 API request fails or the listing would be
+                incomplete
             Exception: If the child pages cannot be retrieved
         """
         try:
@@ -862,6 +864,8 @@ class PagesMixin(ConfluenceClient):
 
         except HTTPError:
             raise  # let decorator handle auth errors
+        except ValueError:
+            raise  # v2 adapter errors already carry a client-safe message
         except Exception as e:
             logger.error(f"Error fetching child pages for page {page_id}: {str(e)}")
             logger.debug("Full exception details:", exc_info=True)

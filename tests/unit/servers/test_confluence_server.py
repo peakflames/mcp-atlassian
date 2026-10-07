@@ -507,7 +507,11 @@ def _fake_response(status_code: int, payload: dict | None = None) -> MagicMock:
     response.text = json.dumps(payload or {})
     response.json.return_value = payload or {}
     if status_code >= 400:
-        error = requests.HTTPError(f"{status_code} Client Error", response=response)
+        # Same shape as requests' own message, which includes the request URL.
+        error = requests.HTTPError(
+            f"{status_code} Client Error: Error for url: {CHILDREN_URL}",
+            response=response,
+        )
         response.raise_for_status.side_effect = error
     return response
 
@@ -587,9 +591,13 @@ async def test_get_page_children_error_returns_clean_error(
 
     assert response.is_error is False
     result_data = json.loads(response.content[0].text)
-    assert "results" not in result_data
-    assert result_data["error"].startswith("Failed to get child pages:")
-    assert "404" in result_data["error"]
+    assert result_data == {
+        "error": "Page not found or not accessible: 123456",
+        "parent_id": "123456",
+    }
+    # The gateway URL (which carries the cloud ID) stays in the logs.
+    assert OAUTH_GATEWAY_URL not in response.content[0].text
+    assert "mock_cloud_id" not in response.content[0].text
     assert "Traceback" not in response.content[0].text
 
 
@@ -610,6 +618,23 @@ async def test_get_page_children_auth_error_returns_clean_error(
         "Authentication failed. Please check your credentials."
     )
     assert "401" in result_data["details"]
+    assert OAUTH_GATEWAY_URL not in response.content[0].text
+
+
+@pytest.mark.anyio
+async def test_get_page_children_server_error_omits_gateway_url(
+    oauth_page_client, oauth_page_fetcher
+):
+    """Non-404 HTTP errors report the status without the request URL."""
+    oauth_page_fetcher.confluence._session.get.return_value = _fake_response(500)
+
+    response = await oauth_page_client.call_tool(
+        "confluence_get_page_children", {"parent_id": "123456"}
+    )
+
+    result_data = json.loads(response.content[0].text)
+    assert result_data["error"] == ("Failed to get children of page '123456': HTTP 500")
+    assert OAUTH_GATEWAY_URL not in response.content[0].text
 
 
 @pytest.mark.anyio
