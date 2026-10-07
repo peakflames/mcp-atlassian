@@ -35,19 +35,21 @@ ValueError: Version 'X.Y.ZpeakflamesN' does not conform to the PEP 440 style
 string, and rejects `vX.Y.Z-peakflames.N` because it is not PEP 440. This happens
 with or without `--no-editable`; `--no-editable` alone does not fix it.
 
-**Fix — set `UV_DYNAMIC_VERSIONING_BYPASS` and add `--no-editable`:**
+**Fix — set `UV_DYNAMIC_VERSIONING_BYPASS`:**
 
 ```powershell
 # PowerShell
-$env:UV_DYNAMIC_VERSIONING_BYPASS="0.21.2"; uv sync --frozen --all-extras --dev --no-editable
+$env:UV_DYNAMIC_VERSIONING_BYPASS="0.21.2"; uv sync --frozen --all-extras --dev
 ```
 
 ```bash
 # bash
-UV_DYNAMIC_VERSIONING_BYPASS=0.21.2 uv sync --frozen --all-extras --dev --no-editable
+UV_DYNAMIC_VERSIONING_BYPASS=0.21.2 uv sync --frozen --all-extras --dev
 ```
 
 The bypass skips reading the git tag and uses the given version instead. Keep the
 value in step with the upstream base version (the `X.Y.Z` part of the current
-`vX.Y.Z-peakflames.N` tag). Note: with `--no-editable` you must re-run `uv sync`
-after editing source files to pick up changes.
+`vX.Y.Z-peakflames.N` tag).
+
+The Dockerfile uses `--no-editable` for its own image build; local development
+does not need it.

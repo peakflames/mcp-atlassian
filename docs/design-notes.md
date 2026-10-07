@@ -348,9 +348,9 @@ ValueError: Version 'X.Y.ZpeakflamesN' does not conform to the PEP 440 style
 
 **Root cause:** Fork tags use the pattern `vX.Y.Z-peakflames.N` (e.g., `v0.21.2-peakflames.1`). When `uv sync` builds the project, hatchling calls `uv-dynamic-versioning`. That tool reads the git tag and tries to convert it to a version string, which fails PEP 440 validation for pre-release suffixes like `-peakflames.N`. This happens with or without `--no-editable`.
 
-**Workaround:** Set `UV_DYNAMIC_VERSIONING_BYPASS` to the upstream base version and add `--no-editable`. PowerShell: `$env:UV_DYNAMIC_VERSIONING_BYPASS="0.21.2"; uv sync --no-editable --frozen --all-extras --dev`. bash: `UV_DYNAMIC_VERSIONING_BYPASS=0.21.2 uv sync --no-editable --frozen --all-extras --dev`. See CLAUDE.md for details.
+**Workaround:** Set `UV_DYNAMIC_VERSIONING_BYPASS` to the upstream base version. PowerShell: `$env:UV_DYNAMIC_VERSIONING_BYPASS="0.21.2"; uv sync --frozen --all-extras --dev`. bash: `UV_DYNAMIC_VERSIONING_BYPASS=0.21.2 uv sync --frozen --all-extras --dev`. See CLAUDE.md for details.
 
-**Impact:** Developers working on the fork must set the bypass variable and keep its value in step with the upstream base version.
+**Impact:** Developers working on the fork must set the bypass variable and keep its value in step with the upstream base version. CI and Docker image builds are unaffected (Docker Publish succeeds on PRs, main and version tags).
 
 ### Pre-commit mypy Error in `servers/main.py`
 

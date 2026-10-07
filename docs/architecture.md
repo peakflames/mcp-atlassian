@@ -465,4 +465,4 @@ Image tags follow semver + fork suffix:
 2. **OAuth 2.0**: Multi-instance support requires `ATLASSIAN_OAUTH_CLOUD_ID` configuration; without it, first resource is used
 3. **Token Validation**: OAuth tokens are validated against configured site **before** caching — bad tokens are never written to keyring
 4. **Read-only Mode**: Set `READ_ONLY_MODE=true` at server startup; it blocks all write tools
-5. **Sync Command Fix**: Set `UV_DYNAMIC_VERSIONING_BYPASS` to the upstream base version (e.g. `0.21.2`) and use `uv sync --no-editable --frozen --all-extras --dev` (see CLAUDE.md)
+5. **Sync Command Fix**: Set `UV_DYNAMIC_VERSIONING_BYPASS` to the upstream base version (e.g. `0.21.2`) and use `uv sync --frozen --all-extras --dev` (see CLAUDE.md)
