@@ -1,4 +1,6 @@
+import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any, TypeVar
@@ -14,6 +16,79 @@ logger = logging.getLogger(__name__)
 
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
+
+# Tool keyword arguments read by the Jira per-project write guard in
+# ``check_write_access``. Tests compare these against the parameters of every
+# Jira write tool so a renamed or newly added key-bearing parameter is caught.
+JIRA_GUARD_PROJECT_KEY_KWARGS: tuple[str, ...] = ("project_key",)
+JIRA_GUARD_ISSUE_KEY_KWARGS: tuple[str, ...] = (
+    "issue_key",
+    "inward_issue_key",
+    "outward_issue_key",
+    "epic_key",
+)
+JIRA_GUARD_ISSUE_KEY_LIST_KWARGS: tuple[str, ...] = ("issue_keys",)
+JIRA_GUARD_FIELDS_KWARGS: tuple[str, ...] = ("fields", "additional_fields")
+JIRA_GUARD_BATCH_ISSUES_KWARGS: tuple[str, ...] = ("issues",)
+
+_JIRA_ISSUE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
+# Field names the Jira fetcher accepts as an epic link (see jira/issues.py).
+_JIRA_EPIC_LINK_ALIASES = frozenset({"epickey", "epic_link", "epiclink", "epic link"})
+
+
+def _unresolved_jira_reference(value: Any, source: str) -> ValueError:
+    return ValueError(
+        f"Cannot determine the Jira project for {value!r} in '{source}'. "
+        "Per-project access control is configured (JIRA_PROJECTS_BLOCKED / "
+        "JIRA_PROJECTS_READONLY), so references must use project keys "
+        "(e.g. 'PROJ') or issue keys (e.g. 'PROJ-123')."
+    )
+
+
+def _jira_project_from_issue_ref(ref: Any, source: str) -> str:
+    """Return the project key of an issue key, or raise if it is not a key."""
+    text = str(ref).strip()
+    if not _JIRA_ISSUE_KEY_RE.match(text):
+        raise _unresolved_jira_reference(ref, source)
+    return text.split("-", 1)[0].upper()
+
+
+def _parse_json_arg(value: Any) -> Any:
+    """Parse a JSON string argument; return None if it is malformed."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None  # Malformed JSON; let the tool surface it
+    return value
+
+
+def _jira_projects_from_fields(fields: dict[str, Any], source: str) -> list[str]:
+    """Collect project keys referenced by a Jira fields dictionary.
+
+    Covers a ``project`` override, a ``parent`` issue and epic link aliases.
+    A non-empty reference whose project cannot be determined raises
+    ``ValueError`` because the write would otherwise proceed against an
+    unidentified project.
+    """
+    keys: list[str] = []
+    for name, value in fields.items():
+        if value is None or value == "":
+            continue
+        lname = name.lower()
+        if lname == "project":
+            if isinstance(value, dict) and value.get("key"):
+                keys.append(str(value["key"]))
+            elif isinstance(value, str):
+                keys.append(value)
+            else:
+                raise _unresolved_jira_reference(value, f"{source}.{name}")
+        elif lname == "parent" or lname in _JIRA_EPIC_LINK_ALIASES:
+            ref = value.get("key") if isinstance(value, dict) else value
+            if not isinstance(ref, str):
+                raise _unresolved_jira_reference(value, f"{source}.{name}")
+            keys.append(_jira_project_from_issue_ref(ref, f"{source}.{name}"))
+    return keys
 
 
 def handle_tool_errors(func: F) -> F:
@@ -50,6 +125,11 @@ def check_write_access(func: F) -> F:
     Raises a ToolError when:
     - The server is in global read-only mode.
     - The target Jira project is in JIRA_PROJECTS_BLOCKED or JIRA_PROJECTS_READONLY.
+      Every project a call touches is checked: project keys, issue keys
+      (both link ends, the epic, comma-separated lists), each batch item, and
+      ``project`` / ``parent`` / epic-link entries in JSON field arguments.
+      While either list is set, a reference whose project cannot be
+      determined (e.g. a numeric issue ID) is rejected.
     - The target Confluence space is in CONFLUENCE_SPACES_BLOCKED or
       CONFLUENCE_SPACES_READONLY.
 
@@ -82,7 +162,6 @@ def check_write_access(func: F) -> F:
                 ProjectAccessError,
                 check_confluence_space_access,
                 check_jira_project_access,
-                extract_jira_project_key,
             )
 
             # --- Jira project checks ---
@@ -92,47 +171,65 @@ def check_write_access(func: F) -> F:
             ):
                 project_keys_to_check: list[str] = []
 
-                direct_project_key = kwargs.get("project_key")
-                if direct_project_key:
-                    project_keys_to_check.append(str(direct_project_key))
+                for kw in JIRA_GUARD_PROJECT_KEY_KWARGS:
+                    direct_project_key = kwargs.get(kw)
+                    if direct_project_key:
+                        project_keys_to_check.append(str(direct_project_key))
 
-                for kw in ("issue_key", "inward_issue_key", "outward_issue_key"):
+                # Single issue keys (incl. both ends of a link and the epic)
+                for kw in JIRA_GUARD_ISSUE_KEY_KWARGS:
                     ik = kwargs.get(kw)
                     if ik:
-                        project_keys_to_check.append(extract_jira_project_key(str(ik)))
+                        project_keys_to_check.append(
+                            _jira_project_from_issue_ref(ik, kw)
+                        )
+
+                # Comma-separated (or list) issue keys, e.g. add_issues_to_sprint
+                for kw in JIRA_GUARD_ISSUE_KEY_LIST_KWARGS:
+                    raw_keys = kwargs.get(kw)
+                    if not raw_keys:
+                        continue
+                    key_items = (
+                        raw_keys
+                        if isinstance(raw_keys, list | tuple)
+                        else str(raw_keys).split(",")
+                    )
+                    for ik in key_items:
+                        if str(ik).strip():
+                            project_keys_to_check.append(
+                                _jira_project_from_issue_ref(ik, kw)
+                            )
+
+                # JSON field dictionaries: project override, parent, epic link
+                for kw in JIRA_GUARD_FIELDS_KWARGS:
+                    fields_dict = _parse_json_arg(kwargs.get(kw))
+                    if isinstance(fields_dict, dict):
+                        project_keys_to_check.extend(
+                            _jira_projects_from_fields(fields_dict, kw)
+                        )
+
+                # batch_create_issues: every item names its own project.
+                # Items without a project_key are left for the tool to reject;
+                # it does not create an issue for them.
+                for kw in JIRA_GUARD_BATCH_ISSUES_KWARGS:
+                    issues_list = _parse_json_arg(kwargs.get(kw))
+                    if not isinstance(issues_list, list):
+                        continue
+                    for idx, item in enumerate(issues_list):
+                        if not isinstance(item, dict):
+                            continue
+                        batch_pk = item.get("project_key")
+                        if batch_pk:
+                            project_keys_to_check.append(str(batch_pk))
+                        project_keys_to_check.extend(
+                            _jira_projects_from_fields(item, f"{kw}[{idx}]")
+                        )
 
                 for pk in project_keys_to_check:
                     try:
                         check_jira_project_access(jira_config, pk, write=True)
                     except ProjectAccessError as exc:
                         raise ValueError(str(exc)) from exc
-
-                # batch_create_issues / batch_create_versions embed project_key in JSON
-                issues_data = kwargs.get("issues_data")
-                if issues_data:
-                    import json as _json  # noqa: PLC0415
-
-                    # Parse JSON separately so access-control ValueErrors are not swallowed
-                    try:
-                        issues_list = (
-                            _json.loads(issues_data)
-                            if isinstance(issues_data, str)
-                            else issues_data
-                        )
-                    except (TypeError, _json.JSONDecodeError):
-                        issues_list = None  # Malformed JSON; let the tool surface it
-
-                    if isinstance(issues_list, list):
-                        for item in issues_list:
-                            if isinstance(item, dict):
-                                batch_pk = item.get("project_key")
-                                if batch_pk:
-                                    try:
-                                        check_jira_project_access(
-                                            jira_config, str(batch_pk), write=True
-                                        )
-                                    except ProjectAccessError as exc:
-                                        raise ValueError(str(exc)) from exc
 
             # --- Confluence space checks ---
             conf_config = app_lifespan_ctx.full_confluence_config

@@ -7,6 +7,25 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+### Fixes
+
+- Jira per-project write access control (`JIRA_PROJECTS_BLOCKED` /
+  `JIRA_PROJECTS_READONLY`) now checks every project a write tool touches
+  (`src/mcp_atlassian/utils/decorators.py`):
+  - `jira_batch_create_issues`: each item in `issues`, including a `project`
+    field set on the item.
+  - `jira_link_to_epic`: both `issue_key` and `epic_key`.
+  - `jira_add_issues_to_sprint`: each key in `issue_keys`.
+  - `jira_create_issue`, `jira_update_issue`, `jira_transition_issue`:
+    `project`, `parent` and epic-link (`epicKey`, `epic_link`, `epicLink`,
+    `Epic Link`) entries in `fields` / `additional_fields`.
+  - While either list is set, a reference whose project cannot be determined
+    (a numeric issue ID, or a `project` given only by ID) is rejected. Epic
+    links set through a raw `customfield_*` ID are not inspected.
+- Tests now check that every argument name the guard reads exists on the
+  write tools it is meant for, and that key-bearing parameters on Jira write
+  tools are read by the guard.
+
 ## v0.21.2-peakflames.5
 
 ### Fixes
