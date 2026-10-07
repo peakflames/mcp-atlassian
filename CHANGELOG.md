@@ -28,6 +28,10 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
   and `confluence_add_label`) now enforce `CONFLUENCE_SPACES_BLOCKED` and
   `CONFLUENCE_SPACES_READONLY` for the page's space, and are denied when that
   space cannot be determined while either list is set.
+- `confluence_create_page`, `confluence_update_page` (with `parent_id`), and
+  `confluence_move_page` (with `target_parent_id`) also check the parent's
+  space against `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY`,
+  and are denied when it cannot be determined while either list is set.
 - `confluence_get_page` now fails closed when a block list is set and the
   page's space cannot be determined. When called with `title` and
   `space_key`, it enforces `CONFLUENCE_SPACES_BLOCKED` for both the requested

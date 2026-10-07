@@ -32,6 +32,7 @@ from mcp_atlassian.confluence.config import ConfluenceConfig
 from mcp_atlassian.servers.confluence import (
     add_comment,
     add_label,
+    create_page,
     delete_page,
     download_attachment,
     download_content_attachments,
@@ -58,6 +59,7 @@ PAGES: dict[str, tuple[str, str | None]] = {
     "100": ("9001", "LEGAL"),
     "200": ("9002", "ENG"),
     "300": ("9003", None),
+    "400": ("9004", "OPS"),
 }
 # comment id -> page id
 COMMENTS = {f"1{page_id}": page_id for page_id in PAGES}
@@ -159,7 +161,10 @@ class FakeConfluence:
         if via_gateway and path.startswith("/rest/api/"):
             # The Cloud OAuth gateway no longer serves v1 content reads.
             return _response(410, {"message": "Gone"})
-        return self._route(path, parse_qs(split.query))
+        query = parse_qs(split.query)
+        for key, value in (kwargs.get("params") or {}).items():
+            query[key] = [str(value)]
+        return self._route(path, query)
 
     def data_paths(self) -> list[str]:
         return [p for p in self.paths if DATA_PATH.search(p)]
@@ -169,6 +174,14 @@ class FakeConfluence:
             return _response(200, content=IMAGE_BYTES)
 
         # ---- v2 (Cloud OAuth gateway) ----
+        if path == "/api/v2/spaces":
+            wanted = query.get("keys", [""])[0]
+            found = [
+                {"id": space_id, "key": key}
+                for space_id, key in PAGES.values()
+                if key == wanted
+            ]
+            return _response(200, {"results": found})
         if m := re.fullmatch(r"/api/v2/spaces/(\d+)", path):
             for space_id, key in PAGES.values():
                 if space_id == m[1]:
@@ -251,6 +264,8 @@ class FakeConfluence:
                 else []
             )
             return _response(200, {"results": tree, "_links": {}})
+        if re.fullmatch(r"/rest/api/content/(\d+)/history", path):
+            return _response(200, {"lastUpdated": {"number": 1}})
         if m := re.fullmatch(r"/rest/api/content/(\d+)/child/comment", path):
             return _response(
                 200,
@@ -364,6 +379,7 @@ async def connect(http: None) -> AsyncIterator[Callable[..., Awaitable[Client]]]
                 reply_to_comment,
                 add_comment,
                 add_label,
+                create_page,
                 update_page,
                 delete_page,
                 move_page,
@@ -763,6 +779,63 @@ async def test_page_write_tools_denied(
     with pytest.raises(ToolError, match=message):
         await client.call_tool(tool, PAGE_WRITE_TOOLS[tool](page_id))
     assert fake.writes == []
+
+
+# Page 400 lives in OPS, which is in neither list, so only the parent decides.
+OPS_PAGE = "400"
+PARENT_TOOLS: dict[str, Callable[[str], dict[str, Any]]] = {
+    "create_page": lambda parent: {
+        "space_key": "OPS",
+        "title": "t",
+        "content": "c",
+        "parent_id": parent,
+    },
+    "update_page": lambda parent: {
+        "page_id": OPS_PAGE,
+        "title": "t",
+        "content": "c",
+        "parent_id": parent,
+    },
+    "move_page": lambda parent: {"page_id": OPS_PAGE, "target_parent_id": parent},
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", list(PARENT_TOOLS))
+@pytest.mark.parametrize(
+    ("parent_id", "blocked", "readonly", "message"), DENIED_WRITE_CASES
+)
+async def test_parent_space_write_denied(
+    connect: Any,
+    fake: FakeConfluence,
+    mode: str,
+    tool: str,
+    parent_id: str,
+    blocked: str | None,
+    readonly: str | None,
+    message: str,
+) -> None:
+    """A new parent counts as a write into the parent's space."""
+    client = await connect(mode, blocked=blocked, readonly=readonly)
+    with pytest.raises(ToolError, match=message):
+        await client.call_tool(tool, PARENT_TOOLS[tool](parent_id))
+    assert fake.writes == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", list(PARENT_TOOLS))
+async def test_parent_in_allowed_space_proceeds(
+    connect: Any, fake: FakeConfluence, mode: str, tool: str
+) -> None:
+    client = await connect(mode, blocked="LEGAL", readonly="LEGACY")
+    try:
+        await client.call_tool(tool, PARENT_TOOLS[tool](ALLOWED_PAGE))
+    except ToolError as exc:
+        # The fake's write response is minimal; only the access check matters.
+        assert "CONFLUENCE_SPACES" not in str(exc)
+    assert len(fake.writes) == 1
 
 
 @pytest.mark.anyio

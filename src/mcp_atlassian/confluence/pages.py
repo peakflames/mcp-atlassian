@@ -604,8 +604,12 @@ class PagesMixin(ConfluenceClient):
             ConfluencePage model containing the new page's data
 
         Raises:
+            ProjectAccessError: If the parent's space is blocked, read-only,
+                or cannot be determined while a space list is set
             Exception: If there is an error creating the page
         """
+        if parent_id:
+            self.check_content_access(str(parent_id), write=True)
         try:
             # Determine body and representation based on content type
             if is_markdown:
@@ -701,8 +705,12 @@ class PagesMixin(ConfluenceClient):
             ConfluencePage model containing the updated page's data
 
         Raises:
+            ProjectAccessError: If a new parent's space is blocked, read-only,
+                or cannot be determined while a space list is set
             Exception: If there is an error updating the page
         """
+        if parent_id:
+            self.check_content_access(str(parent_id), write=True)
         try:
             # Determine body and representation based on content type
             if is_markdown:
@@ -1169,12 +1177,16 @@ class PagesMixin(ConfluenceClient):
         Raises:
             ValueError: If neither target_parent_id nor target_space_key
                 is provided.
+            ProjectAccessError: If the target's space is blocked, read-only,
+                or cannot be determined while a space list is set.
             MCPAtlassianAuthenticationError: If authentication fails.
         """
         if not target_parent_id and not target_space_key:
             raise ValueError(
                 "At least one of target_parent_id or target_space_key must be provided."
             )
+        if target_parent_id:
+            self.check_content_access(str(target_parent_id), write=True)
 
         try:
             # Use v2 adapter for OAuth authentication
