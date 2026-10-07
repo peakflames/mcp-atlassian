@@ -7,6 +7,50 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+## v0.21.2-peakflames.5
+
+### Fixes
+
+- Fix Confluence attachment downloads under Cloud OAuth: relative
+  `_links.download` values are now resolved against the Atlassian API gateway
+  (plus `/wiki`) instead of the site URL, which rejects OAuth bearer tokens.
+  Affects `confluence_download_attachment`,
+  `confluence_download_content_attachments`, and `confluence_get_page_images`
+  (`src/mcp_atlassian/confluence/client.py`,
+  `src/mcp_atlassian/servers/confluence.py`,
+  `src/mcp_atlassian/confluence/attachments.py`). Same gateway approach as
+  upstream #1580, but the `/download/attachments/...` path is kept rather than
+  rewritten to the v1 `/rest/api/content/.../download` endpoint, because the
+  gateway is removing v1 content endpoints (upstream issue #1598). This
+  download path has not yet been confirmed live with an OAuth bearer token.
+- Fix `confluence_get_labels` under Cloud OAuth: labels are read via the v2
+  `pages` / `blogposts` / `attachments` label endpoints, because the v1
+  `/rest/api/content/{id}/label` endpoint is no longer served through the
+  gateway (upstream issue #1598) (`src/mcp_atlassian/confluence/labels.py`,
+  `src/mcp_atlassian/confluence/v2_adapter.py`). Requires the
+  `read:label:confluence` scope; OAuth apps with only classic scopes get a 401.
+- Report Smart Link embeds instead of a bare 404 under Cloud OAuth: when
+  `confluence_get_page`, `confluence_get_attachments`, or
+  `confluence_get_labels` gets a 404 for a non-attachment content ID, the ID is
+  checked against `/api/v2/embeds/{id}`. `confluence_get_page` and
+  `confluence_get_attachments` return the embed's title and `embedUrl`;
+  `confluence_get_labels` raises an error that includes the `embedUrl`.
+  Attachment IDs (`att` prefix) and `confluence_download_attachment` are not
+  checked. Embeds in a space listed in `CONFLUENCE_SPACES_BLOCKED` are not
+  reported; if a block list is set and the embed's space cannot be resolved,
+  the original error is returned. Requires the `read:embed:confluence` scope,
+  plus `read:space:confluence` when a block list is set; without them the
+  original error is returned (`src/mcp_atlassian/confluence/client.py`,
+  `src/mcp_atlassian/servers/confluence.py`,
+  `src/mcp_atlassian/confluence/attachments.py`,
+  `src/mcp_atlassian/confluence/labels.py`).
+- Replace a site-specific cloud ID in docs and tests with a placeholder.
+
+### Known limitations
+
+- `confluence_add_label` still uses the v1 POST endpoint and fails under Cloud
+  OAuth; v2 has no label-create endpoint.
+
 ## v0.21.2-peakflames.4
 
 ### Features
