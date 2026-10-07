@@ -902,6 +902,67 @@ async def test_get_page_images_uses_gateway_base_url(client, mock_confluence_fet
 
 
 @pytest.mark.anyio
+async def test_download_attachment_uses_gateway_base_url(
+    client, mock_confluence_fetcher
+):
+    """download_attachment resolves the relative link against the gateway."""
+    gateway = "https://api.atlassian.com/ex/confluence/cloud-123/wiki"
+    mock_confluence_fetcher._attachment_base_url.return_value = gateway
+    mock_confluence_fetcher._v2_adapter.get_attachment_by_id.return_value = {
+        "id": "att1",
+        "title": "report.pdf",
+        "extensions": {"mediaType": "application/pdf", "fileSize": 4},
+        "_links": {"download": "/download/attachments/123/report.pdf?version=1"},
+    }
+    mock_confluence_fetcher.fetch_attachment_content.return_value = b"%PDF"
+
+    response = await client.call_tool(
+        "confluence_download_attachment", {"attachment_id": "att1"}
+    )
+
+    mock_confluence_fetcher.fetch_attachment_content.assert_called_once_with(
+        f"{gateway}/download/attachments/123/report.pdf?version=1"
+    )
+    assert response.content[0].type == "resource"
+
+
+@pytest.mark.anyio
+async def test_download_content_attachments_uses_gateway_base_url(
+    client, mock_confluence_fetcher
+):
+    """download_content_attachments resolves each link against the gateway."""
+    gateway = "https://api.atlassian.com/ex/confluence/cloud-123/wiki"
+    mock_confluence_fetcher._attachment_base_url.return_value = gateway
+    mock_confluence_fetcher.get_content_attachments.return_value = {
+        "success": True,
+        "content_id": "123",
+        "attachments": [
+            {
+                "id": "att1",
+                "title": "report.pdf",
+                "type": "attachment",
+                "extensions": {"mediaType": "application/pdf", "fileSize": 4},
+                "_links": {
+                    "download": "/download/attachments/123/report.pdf?version=1"
+                },
+            },
+        ],
+        "total": 1,
+        "start": 0,
+        "limit": 50,
+    }
+    mock_confluence_fetcher.fetch_attachment_content.return_value = b"%PDF"
+
+    await client.call_tool(
+        "confluence_download_content_attachments", {"content_id": "123"}
+    )
+
+    mock_confluence_fetcher.fetch_attachment_content.assert_called_once_with(
+        f"{gateway}/download/attachments/123/report.pdf?version=1"
+    )
+
+
+@pytest.mark.anyio
 async def test_get_page_images_octet_stream_fallback(client, mock_confluence_fetcher):
     """Test that application/octet-stream with image extension is detected."""
     mock_confluence_fetcher.get_content_attachments.return_value = {

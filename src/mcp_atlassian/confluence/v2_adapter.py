@@ -254,36 +254,9 @@ class ConfluenceV2Adapter:
             space_id: The space ID to look up
 
         Returns:
-            The space key
-
-        Raises:
-            ValueError: If space not found or API error
+            The space key, or the space ID itself if the key cannot be read
         """
-        try:
-            # Use v2 spaces endpoint to get space key
-            url = f"{self.base_url}/api/v2/spaces/{space_id}"
-
-            response = self.session.get(url)
-            response.raise_for_status()
-
-            data = response.json()
-            space_key = data.get("key")
-
-            if not space_key:
-                raise ValueError(f"No key found for space ID '{space_id}'")
-
-            return space_key
-
-        except Exception as e:
-            if isinstance(e, HTTPError) and e.response is not None:
-                logger.error(
-                    f"HTTP error getting space key for ID '{space_id}': {e}\n"
-                    f"Response: {e.response.text}"
-                )
-            else:
-                logger.error(f"Error getting space key for ID '{space_id}': {e}")
-            # Return the space_id as fallback
-            return space_id
+        return self.get_space_key(space_id) or space_id
 
     def get_page(
         self,

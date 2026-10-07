@@ -981,7 +981,7 @@ class TestAttachmentsMixin:
             )
 
             with patch(
-                "mcp_atlassian.confluence.attachments.ConfluenceV2Adapter"
+                "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
             ) as mock_adapter_class:
                 mock_adapter = Mock()
                 mock_adapter.get_page_attachments = mock_v2_get
@@ -1024,7 +1024,7 @@ class TestAttachmentsMixin:
             )
 
             with patch(
-                "mcp_atlassian.confluence.attachments.ConfluenceV2Adapter"
+                "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
             ) as mock_adapter_class:
                 mock_adapter = Mock()
                 mock_adapter.get_page_attachments = mock_v2_get
@@ -1059,7 +1059,7 @@ class TestAttachmentsMixin:
             attachments_mixin.config.auth_type = "oauth"
 
             with patch(
-                "mcp_atlassian.confluence.attachments.ConfluenceV2Adapter"
+                "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
             ) as mock_adapter_class:
                 mock_adapter = Mock()
                 mock_adapter.get_page_attachments.side_effect = ValueError(
@@ -1103,7 +1103,7 @@ class TestAttachmentsMixin:
             attachments_mixin.config.auth_type = "oauth"
 
             with patch(
-                "mcp_atlassian.confluence.attachments.ConfluenceV2Adapter"
+                "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
             ) as mock_adapter_class:
                 mock_adapter = Mock()
                 mock_adapter.delete_attachment.return_value = None
@@ -1151,7 +1151,7 @@ class TestAttachmentsMixin:
             attachments_mixin.config.auth_type = "oauth"
 
             with patch(
-                "mcp_atlassian.confluence.attachments.ConfluenceV2Adapter"
+                "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
             ) as mock_adapter_class:
                 mock_adapter = Mock()
                 mock_adapter.delete_attachment.side_effect = ValueError(

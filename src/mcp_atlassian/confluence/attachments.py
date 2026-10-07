@@ -10,7 +10,6 @@ from ..utils.io import validate_safe_path
 from ..utils.urls import resolve_relative_url
 from .client import ConfluenceClient
 from .protocols import AttachmentsOperationsProto
-from .v2_adapter import ConfluenceV2Adapter
 
 # Configure logging
 logger = logging.getLogger("mcp-confluence")
@@ -18,19 +17,6 @@ logger = logging.getLogger("mcp-confluence")
 
 class AttachmentsMixin(ConfluenceClient, AttachmentsOperationsProto):
     """Mixin for Confluence attachment operations."""
-
-    @property
-    def _v2_adapter(self) -> ConfluenceV2Adapter | None:
-        """Get v2 API adapter for OAuth authentication.
-
-        Returns:
-            ConfluenceV2Adapter instance if OAuth is configured, None otherwise
-        """
-        if self.config.auth_type == "oauth" and self.config.is_cloud:
-            return ConfluenceV2Adapter(
-                session=self.confluence._session, base_url=self.confluence.url
-            )
-        return None
 
     def upload_attachment(
         self,
