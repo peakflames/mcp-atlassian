@@ -1232,6 +1232,206 @@ class ConfluenceV2Adapter:
             )
         return results
 
+    def get_page_children(
+        self,
+        page_id: str,
+        *,
+        start: int = 0,
+        limit: int = 25,
+        include_folders: bool = True,
+        include_version: bool = True,
+        include_body: bool = False,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Get child pages (and optionally folders) of a page using v2 API.
+
+        Lists ``/api/v2/pages/{id}/direct-children`` and keeps only ``page``
+        and, when requested, ``folder`` items, in the order the API returns
+        them. The v2 list is cursor-paginated, so ``start`` is applied by
+        skipping that many matching items while following ``_links.next``.
+
+        The children endpoint returns only ``id``, ``status``, ``title``,
+        ``type``, ``spaceId`` and ``childPosition``. When ``include_version``
+        or ``include_body`` is set, child pages are looked up in one batch via
+        ``/api/v2/pages?id=...`` to add ``version`` and ``body.storage``.
+        Folders have no body and the batch lookup does not cover them, so
+        folders never carry a version or body on this path.
+
+        Args:
+            page_id: The ID of the parent page
+            start: Number of matching child items to skip
+            limit: Maximum number of child items to return
+            include_folders: Whether to include child folders
+            include_version: Whether to add each child page's version
+            include_body: Whether to add each child page's storage body
+            max_pages: Safety cap on the number of list pages fetched
+
+        Returns:
+            List of child items in v1-compatible format
+
+        Raises:
+            HTTPError: If the API request fails with 401/403
+            ValueError: If the parent is not found or other errors
+        """
+        if limit <= 0:
+            return []
+        wanted_types = {"page", "folder"} if include_folders else {"page"}
+        url = f"{self.base_url}/api/v2/pages/{page_id}/direct-children"
+        page_size = max(1, min(250, start + limit))
+        try:
+            children: list[dict[str, Any]] = []
+            skipped = 0
+            params: dict[str, Any] = {"limit": page_size}
+            for _ in range(max_pages):
+                response = self.session.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                for item in data.get("results", []):
+                    if item.get("type") not in wanted_types:
+                        continue
+                    if skipped < start:
+                        skipped += 1
+                        continue
+                    children.append(item)
+                    if len(children) >= limit:
+                        break
+                if len(children) >= limit:
+                    break
+
+                next_link = data.get("_links", {}).get("next")
+                query = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(next_link or "").query
+                )
+                cursor = query.get("cursor", [None])[0]
+                if not cursor:
+                    break
+                params = {"limit": page_size, "cursor": cursor}
+            else:
+                logger.warning(
+                    f"Stopped after {max_pages} pages ({len(children)} results) "
+                    f"listing children of page '{page_id}'; remaining results "
+                    "were not fetched"
+                )
+
+            details: dict[str, dict[str, Any]] = {}
+            page_ids = [str(c["id"]) for c in children if c.get("type") == "page"]
+            if page_ids and (include_version or include_body):
+                details = self._get_pages_by_id(page_ids, include_body=include_body)
+
+            spaces: dict[str, dict[str, Any] | None] = {}
+            converted = []
+            for child in children:
+                child_id = str(child.get("id"))
+                detail = details.get(child_id, {})
+                space_id = child.get("spaceId") or detail.get("spaceId")
+                if space_id and space_id not in spaces:
+                    spaces[space_id] = self._get_space_summary(str(space_id))
+                converted.append(
+                    self._convert_child_v2_to_v1(
+                        child,
+                        detail,
+                        spaces.get(space_id) if space_id else None,
+                        include_version=include_version,
+                        include_body=include_body,
+                    )
+                )
+
+            logger.debug(
+                f"Retrieved {len(converted)} children of page '{page_id}' with v2 API"
+            )
+            return converted
+
+        except HTTPError as e:
+            if e.response is not None and e.response.status_code in [401, 403]:
+                logger.error(
+                    f"Authentication error getting children of page '{page_id}': {e}"
+                )
+                raise
+            logger.warning(f"HTTP error getting children of page '{page_id}': {e}")
+            msg = f"Failed to get children of page '{page_id}': {e}"
+            raise ValueError(msg) from e
+        except Exception as e:
+            logger.error(f"Error getting children of page '{page_id}': {e}")
+            msg = f"Failed to get children of page '{page_id}': {e}"
+            raise ValueError(msg) from e
+
+    def _get_pages_by_id(
+        self, page_ids: list[str], *, include_body: bool
+    ) -> dict[str, dict[str, Any]]:
+        """Look up several pages in one ``/api/v2/pages`` request.
+
+        Args:
+            page_ids: Page IDs to look up (at most 250)
+            include_body: Whether to request the storage body
+
+        Returns:
+            Mapping of page ID to the v2 page object
+
+        Raises:
+            HTTPError: If the request fails
+        """
+        params: dict[str, Any] = {"id": page_ids, "limit": len(page_ids)}
+        if include_body:
+            params["body-format"] = "storage"
+        response = self.session.get(f"{self.base_url}/api/v2/pages", params=params)
+        response.raise_for_status()
+        return {
+            str(page.get("id")): page for page in response.json().get("results", [])
+        }
+
+    def _get_space_summary(self, space_id: str) -> dict[str, Any] | None:
+        """Get a space's ID, key and name, or None if it cannot be read."""
+        url = f"{self.base_url}/api/v2/spaces/{space_id}"
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(f"Could not read space '{space_id}': {e}")
+            return None
+        if not isinstance(data, dict) or not data.get("key"):
+            return None
+        summary: dict[str, Any] = {"id": space_id, "key": data["key"]}
+        if data.get("name"):
+            summary["name"] = data["name"]
+        return summary
+
+    @staticmethod
+    def _convert_child_v2_to_v1(
+        child: dict[str, Any],
+        detail: dict[str, Any],
+        space: dict[str, Any] | None,
+        *,
+        include_version: bool,
+        include_body: bool,
+    ) -> dict[str, Any]:
+        """Convert a v2 child item (plus optional page detail) to v1 format."""
+        result: dict[str, Any] = {
+            "id": child.get("id"),
+            "type": child.get("type", "page"),
+            "status": child.get("status", "current"),
+            "title": child.get("title") or detail.get("title"),
+            "_links": detail.get("_links", {}),
+        }
+        if space:
+            result["space"] = space
+        version = detail.get("version")
+        if include_version and isinstance(version, dict):
+            v1_version: dict[str, Any] = {"number": version.get("number", 0)}
+            if version.get("createdAt"):
+                v1_version["when"] = version["createdAt"]
+            if version.get("message"):
+                v1_version["message"] = version["message"]
+            result["version"] = v1_version
+        if include_body and "body" in detail:
+            result["body"] = {
+                "storage": {
+                    "value": detail["body"].get("storage", {}).get("value", ""),
+                    "representation": "storage",
+                }
+            }
+        return result
+
     def get_space_key(self, space_id: str) -> str | None:
         """Get a space key from its ID, without falling back to the ID.
 

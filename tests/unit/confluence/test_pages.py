@@ -639,11 +639,9 @@ class TestPagesMixin:
             "API Error"
         )
 
-        # Act
-        results = pages_mixin.get_page_children(page_id=parent_id)
-
-        # Assert - should return empty list on error, not raise exception
-        assert len(results) == 0
+        # Act/Assert - the error is raised, not reported as "no children"
+        with pytest.raises(Exception, match="Error fetching child pages"):
+            pages_mixin.get_page_children(page_id=parent_id)
 
     def test_get_page_children_folder_error_graceful(self, pages_mixin):
         """Test that folder fetch errors don't fail the whole operation."""

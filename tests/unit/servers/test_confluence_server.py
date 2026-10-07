@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import requests
 from fastmcp import Client, FastMCP
 from fastmcp.client import FastMCPTransport
 from starlette.requests import Request
@@ -493,6 +494,122 @@ async def test_get_page_children(client, mock_confluence_fetcher):
     assert "results" in result_data
     assert len(result_data["results"]) > 0
     assert result_data["results"][0]["title"] == "Test Page Mock Title"
+
+
+OAUTH_GATEWAY_URL = "https://api.atlassian.com/ex/confluence/mock_cloud_id"
+CHILDREN_URL = f"{OAUTH_GATEWAY_URL}/api/v2/pages/123456/direct-children"
+
+
+def _fake_response(status_code: int, payload: dict | None = None) -> MagicMock:
+    """Build a requests-style response for a mocked HTTP session."""
+    response = MagicMock(spec=requests.Response)
+    response.status_code = status_code
+    response.text = json.dumps(payload or {})
+    response.json.return_value = payload or {}
+    if status_code >= 400:
+        error = requests.HTTPError(f"{status_code} Client Error", response=response)
+        response.raise_for_status.side_effect = error
+    return response
+
+
+@pytest.fixture
+def oauth_page_fetcher(mock_base_confluence_config):
+    """A real ConfluenceFetcher on Cloud OAuth with only the HTTP session mocked."""
+    with patch(
+        "src.mcp_atlassian.confluence.client.ConfluenceClient.__init__",
+        return_value=None,
+    ):
+        fetcher = ConfluenceFetcher()
+    fetcher.config = mock_base_confluence_config
+    fetcher.confluence = MagicMock()
+    fetcher.confluence.url = OAUTH_GATEWAY_URL
+    fetcher.confluence._session = MagicMock(spec=requests.Session)
+    return fetcher
+
+
+@pytest.fixture
+async def oauth_page_client(test_confluence_mcp, oauth_page_fetcher):
+    """FastMCP client whose tools use the real OAuth page fetcher."""
+    with (
+        patch(
+            "src.mcp_atlassian.servers.confluence.get_confluence_fetcher",
+            AsyncMock(return_value=oauth_page_fetcher),
+        ),
+        patch(
+            "src.mcp_atlassian.servers.dependencies.get_http_request",
+            MagicMock(spec=Request, state=MagicMock()),
+        ),
+    ):
+        async with Client(transport=FastMCPTransport(test_confluence_mcp)) as client:
+            yield client
+
+
+@pytest.mark.anyio
+async def test_get_page_children_oauth_v2(oauth_page_client, oauth_page_fetcher):
+    """Under Cloud OAuth the tool lists children through the v2 API."""
+    responses = {
+        CHILDREN_URL: {
+            "results": [
+                {"id": "201", "title": "Child A", "type": "page", "spaceId": "555"},
+                {"id": "203", "title": "Folder B", "type": "folder", "spaceId": "555"},
+            ]
+        },
+        f"{OAUTH_GATEWAY_URL}/api/v2/pages": {
+            "results": [{"id": "201", "spaceId": "555", "version": {"number": 4}}]
+        },
+        f"{OAUTH_GATEWAY_URL}/api/v2/spaces/555": {"id": "555", "key": "ENG"},
+    }
+    session = oauth_page_fetcher.confluence._session
+    session.get.side_effect = lambda url, **_: _fake_response(200, responses[url])
+
+    response = await oauth_page_client.call_tool(
+        "confluence_get_page_children", {"parent_id": "123456"}
+    )
+
+    result_data = json.loads(response.content[0].text)
+    assert result_data["count"] == 2
+    assert [r["id"] for r in result_data["results"]] == ["201", "203"]
+    assert result_data["results"][0]["version"] == 4
+    assert result_data["results"][0]["space"]["key"] == "ENG"
+    oauth_page_fetcher.confluence.get_page_child_by_type.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_get_page_children_error_returns_clean_error(
+    oauth_page_client, oauth_page_fetcher
+):
+    """A failed lookup is reported as an error, not as an empty child list."""
+    oauth_page_fetcher.confluence._session.get.return_value = _fake_response(404)
+
+    response = await oauth_page_client.call_tool(
+        "confluence_get_page_children", {"parent_id": "123456"}
+    )
+
+    assert response.is_error is False
+    result_data = json.loads(response.content[0].text)
+    assert "results" not in result_data
+    assert result_data["error"].startswith("Failed to get child pages:")
+    assert "404" in result_data["error"]
+    assert "Traceback" not in response.content[0].text
+
+
+@pytest.mark.anyio
+async def test_get_page_children_auth_error_returns_clean_error(
+    oauth_page_client, oauth_page_fetcher
+):
+    """A 401/403 is reported as an authentication error."""
+    oauth_page_fetcher.confluence._session.get.return_value = _fake_response(401)
+
+    response = await oauth_page_client.call_tool(
+        "confluence_get_page_children", {"parent_id": "123456"}
+    )
+
+    result_data = json.loads(response.content[0].text)
+    assert "results" not in result_data
+    assert result_data["error"] == (
+        "Authentication failed. Please check your credentials."
+    )
+    assert "401" in result_data["details"]
 
 
 @pytest.mark.anyio

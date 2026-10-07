@@ -8,12 +8,15 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import requests
+from atlassian import Confluence
 from requests.exceptions import HTTPError
 
 from mcp_atlassian.confluence.attachments import AttachmentsMixin
 from mcp_atlassian.confluence.client import ConfluenceClient
 from mcp_atlassian.confluence.labels import LabelsMixin
+from mcp_atlassian.confluence.pages import PagesMixin
 from mcp_atlassian.confluence.v2_adapter import ConfluenceV2Adapter
+from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.utils.urls import resolve_relative_url
 
 GATEWAY_URL = "https://api.atlassian.com/ex/confluence/test-cloud-id"
@@ -430,3 +433,307 @@ class TestEmbedInfo:
         assert result["success"] is False
         assert result["content_type"] == "embed"
         assert result["embed_url"] == "https://example.com/d"
+
+
+CHILDREN_URL = f"{GATEWAY_URL}/api/v2/pages/123/direct-children"
+CHILDREN_PAGE_1 = {
+    "results": [
+        {
+            "id": "201",
+            "status": "current",
+            "title": "Child A",
+            "type": "page",
+            "spaceId": "555",
+            "childPosition": 0,
+        },
+        {
+            "id": "202",
+            "status": "current",
+            "title": "Board",
+            "type": "whiteboard",
+            "spaceId": "555",
+            "childPosition": 1,
+        },
+        {
+            "id": "203",
+            "status": "current",
+            "title": "Folder B",
+            "type": "folder",
+            "spaceId": "555",
+            "childPosition": 2,
+        },
+    ],
+    "_links": {
+        "next": "/wiki/api/v2/pages/123/direct-children?limit=25&cursor=abc",
+        "base": "https://example.atlassian.net/wiki",
+    },
+}
+CHILDREN_PAGE_2 = {
+    "results": [
+        {
+            "id": "204",
+            "status": "current",
+            "title": "Child C",
+            "type": "page",
+            "spaceId": "555",
+            "childPosition": 3,
+        },
+    ],
+    "_links": {},
+}
+PAGE_DETAILS = {
+    "results": [
+        {
+            "id": "201",
+            "title": "Child A",
+            "spaceId": "555",
+            "version": {
+                "number": 3,
+                "createdAt": "2024-01-02T03:04:05.000Z",
+                "message": "edit",
+            },
+            "body": {
+                "storage": {"value": "<p>A body</p>", "representation": "storage"}
+            },
+            "_links": {"webui": "/spaces/ENG/pages/201/Child+A"},
+        },
+        {
+            "id": "204",
+            "title": "Child C",
+            "spaceId": "555",
+            "version": {"number": 1, "createdAt": "2024-02-03T04:05:06.000Z"},
+            "body": {
+                "storage": {"value": "<p>C body</p>", "representation": "storage"}
+            },
+        },
+    ]
+}
+SPACE = {"id": "555", "key": "ENG", "name": "Engineering"}
+
+
+def _route(routes: dict[str, Any]) -> Any:
+    """Build a session.get side effect that answers by URL (and cursor)."""
+
+    def get(url: str, params: dict[str, Any] | None = None, **_: Any) -> Mock:
+        key = url
+        if params and params.get("cursor"):
+            key = f"{url}#cursor={params['cursor']}"
+        value = routes[key]
+        return value if isinstance(value, Mock) else _response(200, value)
+
+    return get
+
+
+def _v2_routes() -> dict[str, Any]:
+    return {
+        CHILDREN_URL: CHILDREN_PAGE_1,
+        f"{CHILDREN_URL}#cursor=abc": CHILDREN_PAGE_2,
+        f"{GATEWAY_URL}/api/v2/pages": PAGE_DETAILS,
+        f"{GATEWAY_URL}/api/v2/spaces/555": SPACE,
+    }
+
+
+class TestPageChildrenV2:
+    """Cloud OAuth: get_page_children goes through the v2 adapter."""
+
+    def test_lists_pages_and_folders_across_cursor_pages(self) -> None:
+        mixin = _mixin(PagesMixin)
+        session = mixin.confluence._session
+        session.get.side_effect = _route(_v2_routes())
+
+        children = mixin.get_page_children("123", limit=10, expand="version")
+
+        mixin.confluence.get_page_child_by_type.assert_not_called()
+        assert [c.id for c in children] == ["201", "203", "204"]
+        assert [c.type for c in children] == ["page", "folder", "page"]
+        assert children[0].title == "Child A"
+        assert children[0].version is not None
+        assert children[0].version.number == 3
+        assert children[0].version.when == "2024-01-02T03:04:05.000Z"
+        assert children[0].version.message == "edit"
+        assert children[1].version is None  # folders carry no version on v2
+        assert children[2].version is not None
+        assert children[2].version.number == 1
+        assert children[0].space is not None
+        assert children[0].space.key == "ENG"
+        assert children[0].space.name == "Engineering"
+        assert children[0].content == ""
+
+        calls = session.get.call_args_list
+        assert calls[0].args[0] == CHILDREN_URL
+        assert calls[0].kwargs["params"] == {"limit": 10}
+        assert calls[1].args[0] == CHILDREN_URL
+        assert calls[1].kwargs["params"] == {"limit": 10, "cursor": "abc"}
+        assert calls[2].args[0] == f"{GATEWAY_URL}/api/v2/pages"
+        assert calls[2].kwargs["params"] == {"id": ["201", "204"], "limit": 2}
+        assert calls[3].args[0] == f"{GATEWAY_URL}/api/v2/spaces/555"
+        assert len(calls) == 4
+
+    def test_simplified_dict_matches_v1_shape(self) -> None:
+        mixin = _mixin(PagesMixin)
+        mixin.confluence._session.get.side_effect = _route(_v2_routes())
+
+        child = mixin.get_page_children("123", limit=1)[0].to_simplified_dict()
+
+        assert child == {
+            "id": "201",
+            "title": "Child A",
+            "type": "page",
+            "created": "",
+            "updated": "",
+            "url": f"{SITE_URL}/pages/viewpage.action?pageId=201",
+            "space": {"key": "ENG", "name": "Engineering"},
+            "version": 3,
+            "attachments": [],
+        }
+
+    def test_start_and_limit_skip_matching_items(self) -> None:
+        mixin = _mixin(PagesMixin)
+        session = mixin.confluence._session
+        session.get.side_effect = _route(_v2_routes())
+
+        children = mixin.get_page_children("123", start=1, limit=1)
+
+        assert [c.id for c in children] == ["203"]
+        # The limit was reached on the first list page: no cursor request.
+        urls = [call.args[0] for call in session.get.call_args_list]
+        assert urls.count(CHILDREN_URL) == 1
+        assert session.get.call_args_list[0].kwargs["params"] == {"limit": 2}
+
+    def test_include_folders_false_returns_pages_only(self) -> None:
+        mixin = _mixin(PagesMixin)
+        mixin.confluence._session.get.side_effect = _route(_v2_routes())
+
+        children = mixin.get_page_children("123", include_folders=False)
+
+        assert [c.id for c in children] == ["201", "204"]
+
+    def test_include_content_reads_storage_body(self) -> None:
+        mixin = _mixin(PagesMixin)
+        session = mixin.confluence._session
+        session.get.side_effect = _route(_v2_routes())
+
+        children = mixin.get_page_children(
+            "123",
+            expand="version,body.storage",
+            convert_to_markdown=False,
+            include_folders=False,
+        )
+
+        assert [c.content for c in children] == ["<p>A body</p>", "<p>C body</p>"]
+        bulk_params = session.get.call_args_list[2].kwargs["params"]
+        assert bulk_params["body-format"] == "storage"
+
+    def test_no_version_or_body_skips_page_lookup(self) -> None:
+        mixin = _mixin(PagesMixin)
+        session = mixin.confluence._session
+        session.get.side_effect = _route(_v2_routes())
+
+        children = mixin.get_page_children("123", expand="ancestors")
+
+        assert [c.id for c in children] == ["201", "203", "204"]
+        urls = [call.args[0] for call in session.get.call_args_list]
+        assert CHILDREN_URL in urls
+        assert f"{GATEWAY_URL}/api/v2/pages" not in urls
+        assert all(c.version is None for c in children)
+
+    def test_not_found_raises(self) -> None:
+        mixin = _mixin(PagesMixin)
+        mixin.confluence._session.get.side_effect = _route(
+            {CHILDREN_URL: _response(404)}
+        )
+
+        with pytest.raises(Exception, match="Failed to get children of page '123'"):
+            mixin.get_page_children("123")
+
+    def test_auth_error_raises_authentication_error(self) -> None:
+        mixin = _mixin(PagesMixin)
+        mixin.confluence._session.get.side_effect = _route(
+            {CHILDREN_URL: _response(401)}
+        )
+
+        with pytest.raises(MCPAtlassianAuthenticationError):
+            mixin.get_page_children("123")
+
+    def test_page_lookup_failure_raises(self) -> None:
+        mixin = _mixin(PagesMixin)
+        routes = _v2_routes()
+        routes[f"{GATEWAY_URL}/api/v2/pages"] = _response(500)
+        mixin.confluence._session.get.side_effect = _route(routes)
+
+        with pytest.raises(Exception, match="Failed to get children of page '123'"):
+            mixin.get_page_children("123")
+
+
+def _http_response(status_code: int, payload: Any) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = json.dumps(payload).encode()
+    response.headers["Content-Type"] = "application/json"
+    return response
+
+
+class TestPageChildrenV1:
+    """Server/DC and non-OAuth Cloud keep using the v1 child endpoints.
+
+    Uses the real atlassian-python-api client with only the HTTP session
+    mocked.
+    """
+
+    @pytest.fixture
+    def mixin(self) -> PagesMixin:
+        mixin = _mixin(PagesMixin, auth_type="basic")
+        session = MagicMock(spec=requests.Session)
+        mixin.confluence = Confluence(url=SITE_URL, session=session)
+        return mixin
+
+    def test_basic_auth_uses_v1_child_endpoints(self, mixin: PagesMixin) -> None:
+        session = mixin.confluence._session
+        session.request.side_effect = [
+            _http_response(
+                200,
+                {
+                    "results": [
+                        {
+                            "id": "201",
+                            "type": "page",
+                            "title": "Child A",
+                            "version": {"number": 3},
+                            "_expandable": {"space": "/rest/api/space/ENG"},
+                        }
+                    ]
+                },
+            ),
+            _http_response(
+                200,
+                {"results": [{"id": "203", "type": "folder", "title": "Folder B"}]},
+            ),
+        ]
+
+        children = mixin.get_page_children("123", limit=10)
+
+        assert [c.id for c in children] == ["201", "203"]
+        assert children[0].version is not None
+        assert children[0].version.number == 3
+        assert children[0].space is not None
+        assert children[0].space.key == "ENG"
+        urls = [call.kwargs["url"] for call in session.request.call_args_list]
+        assert urls[0].startswith(f"{SITE_URL}/rest/api/content/123/child/page?")
+        assert urls[1].startswith(f"{SITE_URL}/rest/api/content/123/child/folder?")
+        session.get.assert_not_called()
+
+    def test_v1_page_error_raises(self, mixin: PagesMixin) -> None:
+        mixin.confluence._session.request.return_value = _http_response(
+            500, {"message": "Internal error"}
+        )
+
+        with pytest.raises(Exception, match="Internal error|500"):
+            mixin.get_page_children("123")
+
+    def test_v1_auth_error_raises_authentication_error(self, mixin: PagesMixin) -> None:
+        mixin.confluence._session.request.return_value = _http_response(
+            401, {"message": "Unauthorized"}
+        )
+
+        with pytest.raises(MCPAtlassianAuthenticationError):
+            mixin.get_page_children("123")
