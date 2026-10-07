@@ -7,8 +7,10 @@ from typing import Any
 from atlassian import Confluence
 from requests import Session
 from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import HTTPError
 
 from ..exceptions import MCPAtlassianAuthenticationError
+from ..utils.access_control import ProjectAccessError, check_confluence_space_access
 from ..utils.logging import get_masked_session_headers, log_config_param, mask_sensitive
 from ..utils.oauth import configure_oauth_session
 from ..utils.ssl import configure_ssl_verification
@@ -166,12 +168,30 @@ class ConfluenceClient:
         """Whether requests go through the Atlassian API gateway (Cloud OAuth)."""
         return self.config.auth_type == "oauth" and self.config.is_cloud
 
+    @property
+    def _v2_adapter(self) -> ConfluenceV2Adapter | None:
+        """Get v2 API adapter for OAuth authentication.
+
+        Returns:
+            ConfluenceV2Adapter instance if OAuth is configured, None otherwise
+        """
+        if self._uses_oauth_gateway():
+            return ConfluenceV2Adapter(
+                session=self.confluence._session, base_url=self.confluence.url
+            )
+        return None
+
     def _attachment_base_url(self) -> str:
         """Return the base URL for resolving relative attachment download links.
 
         Cloud OAuth tokens are only accepted by the Atlassian API gateway stored
         on the underlying client, not by the site URL in ``config.url``. The
-        gateway serves Confluence REST paths under the ``/wiki`` prefix.
+        gateway serves Confluence paths under the ``/wiki`` prefix.
+
+        The relative ``/download/attachments/...`` link is kept as-is rather
+        than rewritten to the v1 ``/rest/api/content/{id}/child/attachment/
+        {att}/download`` endpoint, because the gateway is removing v1 content
+        endpoints (410 Gone).
 
         Returns:
             Base URL to prepend to relative ``_links.download`` values.
@@ -183,28 +203,67 @@ class ConfluenceClient:
             return base_url
         return self.config.url
 
-    def get_embed_info(self, content_id: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _is_not_found(error: BaseException) -> bool:
+        """Whether ``error``, or an exception it wraps, is an HTTP 404."""
+        seen: set[int] = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, HTTPError) and current.response is not None:
+                return current.response.status_code == 404
+            current = current.__cause__ or current.__context__
+        return False
+
+    def _embed_space_allowed(
+        self, adapter: ConfluenceV2Adapter, embed: dict[str, Any]
+    ) -> bool:
+        """Apply ``CONFLUENCE_SPACES_BLOCKED`` to an embed.
+
+        Fails closed: when a block list is configured and the embed's space
+        cannot be resolved to a key, the embed is treated as blocked.
+        """
+        if not self.config.spaces_blocked_set:
+            return True
+        space_id = embed.get("spaceId")
+        space_key = adapter.get_space_key(str(space_id)) if space_id else None
+        if not space_key:
+            logger.warning(
+                f"Could not resolve the space of embed '{embed.get('id')}'; "
+                "withholding it because CONFLUENCE_SPACES_BLOCKED is set"
+            )
+            return False
+        try:
+            check_confluence_space_access(self.config, space_key, write=False)
+        except ProjectAccessError:
+            return False
+        return True
+
+    def get_embed_info(
+        self, content_id: str, error: BaseException
+    ) -> dict[str, Any] | None:
         """Describe a Smart Link embed, if ``content_id`` is one.
 
-        Only available for Cloud OAuth, where content is read via the v2 API.
+        Embeds return 404 on the page and attachment endpoints, so the lookup
+        only runs for Cloud OAuth (v2 API) when ``error`` is a 404. Embeds in
+        a space listed in ``CONFLUENCE_SPACES_BLOCKED`` are not described.
 
         Args:
             content_id: The content ID that failed to resolve as a page
+            error: The exception raised by the original lookup
 
         Returns:
             Error payload describing the embed and its external URL, or None
-            if the ID is not an embed or cannot be looked up.
+            if the ID is not an embed, cannot be looked up, or is blocked.
         """
         if not content_id or content_id.startswith("att"):
             return None
-        if not self._uses_oauth_gateway():
+        adapter = self._v2_adapter
+        if adapter is None or not self._is_not_found(error):
             return None
 
-        adapter = ConfluenceV2Adapter(
-            session=self.confluence._session, base_url=self.confluence.url
-        )
         embed = adapter.get_embed(content_id)
-        if not embed:
+        if not embed or not self._embed_space_allowed(adapter, embed):
             return None
 
         return {

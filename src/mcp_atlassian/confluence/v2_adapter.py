@@ -1152,7 +1152,12 @@ class ConfluenceV2Adapter:
             return None
 
         if response.status_code == 200:
-            return response.json()
+            try:
+                data = response.json()
+            except ValueError as e:
+                logger.debug(f"Embed lookup for '{embed_id}' returned non-JSON: {e}")
+                return None
+            return data if isinstance(data, dict) else None
         if response.status_code in (401, 403):
             logger.warning(
                 f"Could not read embed '{embed_id}' (HTTP {response.status_code}); "
@@ -1247,4 +1252,29 @@ class ConfluenceV2Adapter:
             if not cursor:
                 break
             params = {"limit": limit, "cursor": cursor}
+        else:
+            logger.warning(
+                f"Stopped after {max_pages} pages ({len(results)} results) from "
+                f"{url}; remaining results were not fetched"
+            )
         return results
+
+    def get_space_key(self, space_id: str) -> str | None:
+        """Get a space key from its ID, without falling back to the ID.
+
+        Args:
+            space_id: The space ID to look up
+
+        Returns:
+            The space key, or None if the space cannot be read
+        """
+        url = f"{self.base_url}/api/v2/spaces/{space_id}"
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(f"Could not read space '{space_id}': {e}")
+            return None
+        key = data.get("key") if isinstance(data, dict) else None
+        return str(key) if key else None

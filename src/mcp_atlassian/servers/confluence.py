@@ -207,7 +207,7 @@ async def get_page(
                 page_id_str, convert_to_markdown=convert_to_markdown
             )
         except Exception as e:
-            embed_info = confluence_fetcher.get_embed_info(str(page_id))
+            embed_info = confluence_fetcher.get_embed_info(str(page_id), e)
             if embed_info:
                 return json.dumps(embed_info, indent=2, ensure_ascii=False)
             logger.error(f"Error fetching page by ID '{page_id}': {e}")

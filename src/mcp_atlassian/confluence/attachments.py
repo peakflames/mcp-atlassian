@@ -436,7 +436,7 @@ class AttachmentsMixin(ConfluenceClient, AttachmentsOperationsProto):
             }
 
         except Exception as e:
-            embed_info = self.get_embed_info(content_id)
+            embed_info = self.get_embed_info(content_id, e)
             if embed_info:
                 return embed_info
             error_msg = str(e)
