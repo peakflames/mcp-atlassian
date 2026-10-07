@@ -7,18 +7,23 @@ is called through a FastMCP client. The fake answers both the v1 REST API
 (basic auth, Server/Data Center or Cloud) and the v2 API behind the Cloud
 OAuth gateway, where v1 content endpoints return 410.
 
+The per-request credential tests at the end do not patch
+``get_confluence_fetcher``: the request it sees is the one the real
+``UserTokenMiddleware`` passes on.
+
 Pages:
     100 lives in LEGAL (blocked), 200 lives in ENG (allowed), and the space
     of 300 cannot be determined. Comment 1xxx sits on page xxx.
 """
 
+import base64
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -26,6 +31,7 @@ import requests
 from fastmcp import Client, FastMCP
 from fastmcp.client import FastMCPTransport
 from fastmcp.exceptions import ToolError
+from starlette.requests import Request
 
 from mcp_atlassian.confluence import ConfluenceFetcher
 from mcp_atlassian.confluence.config import ConfluenceConfig
@@ -47,8 +53,12 @@ from mcp_atlassian.servers.confluence import (
     update_page,
 )
 from mcp_atlassian.servers.context import MainAppContext
-from mcp_atlassian.utils.access_control import ProjectAccessError
-from mcp_atlassian.utils.oauth import BYOAccessTokenOAuthConfig
+from mcp_atlassian.servers.main import UserTokenMiddleware
+from mcp_atlassian.utils.access_control import (
+    ProjectAccessError,
+    check_confluence_content_space_access,
+)
+from mcp_atlassian.utils.oauth import BYOAccessTokenOAuthConfig, OAuthConfig
 
 SERVER_URL = "https://confluence.example.com"
 CLOUD_ID = "test-cloud-id"
@@ -64,8 +74,9 @@ PAGES: dict[str, tuple[str, str | None]] = {
 # comment id -> page id
 COMMENTS = {f"1{page_id}": page_id for page_id in PAGES}
 # space key the title search is asked for -> page returned. ENGX stands in
-# for a key the server maps to a page that actually lives in LEGAL.
-TITLE_SEARCH = {"LEGAL": "100", "ENG": "200", "ENGX": "100"}
+# for a key the server maps to a page that actually lives in LEGAL; ENGY for
+# one mapped to a page whose space cannot be read.
+TITLE_SEARCH = {"LEGAL": "100", "ENG": "200", "ENGX": "100", "ENGY": "300"}
 SPACE_PAGES = {"LEGAL": "100", "ENG": "200"}
 SECRET_BODY = "<p>secret body</p>"
 SECRET_LABEL = "secret-label"
@@ -158,6 +169,9 @@ class FakeConfluence:
                     "version": {"number": 1},
                 },
             )
+        if path == "/rest/api/user/current":
+            # Credential check made when a per-request fetcher is created.
+            return _response(200, {"displayName": "Test User"})
         if via_gateway and path.startswith("/rest/api/"):
             # The Cloud OAuth gateway no longer serves v1 content reads.
             return _response(410, {"message": "Gone"})
@@ -344,47 +358,61 @@ def http(fake: FakeConfluence) -> Iterator[None]:
         yield
 
 
-@pytest.fixture
-async def connect(http: None) -> AsyncIterator[Callable[..., Awaitable[Client]]]:
-    """Yield ``connect(mode, blocked=..., readonly=...)`` -> connected client.
+def _server(server_config: ConfluenceConfig | None) -> FastMCP:
+    """Build a server holding the tools under test.
 
     The lifespan context uses the same ``{"app_lifespan_context": ...}`` shape
     as the real server, so ``check_write_access`` runs on write tools.
     """
+
+    @asynccontextmanager
+    async def lifespan(_app: FastMCP) -> AsyncIterator[dict[str, Any]]:
+        yield {
+            "app_lifespan_context": MainAppContext(
+                full_confluence_config=server_config, read_only=False
+            )
+        }
+
+    mcp = FastMCP(name="SpaceAccessTest", lifespan=lifespan)
+    for tool in (
+        get_page,
+        get_labels,
+        get_attachments,
+        download_attachment,
+        download_content_attachments,
+        get_page_images,
+        get_comments,
+        get_space_page_tree,
+        reply_to_comment,
+        add_comment,
+        add_label,
+        create_page,
+        update_page,
+        delete_page,
+        move_page,
+    ):
+        mcp.add_tool(tool)
+    return mcp
+
+
+@pytest.fixture
+async def connect(http: None) -> AsyncIterator[Callable[..., Awaitable[Client]]]:
+    """Yield ``connect(mode, blocked=..., readonly=...)`` -> connected client.
+
+    ``server_config`` replaces the server's global config; by default it is
+    the fetcher's own config.
+    """
     async with AsyncExitStack() as stack:
 
         async def factory(
-            mode: str, blocked: str | None = "LEGAL", readonly: str | None = None
+            mode: str,
+            blocked: str | None = "LEGAL",
+            readonly: str | None = None,
+            *,
+            server_config: ConfluenceConfig | None = None,
         ) -> Client:
             fetcher = _fetcher(mode, blocked=blocked, readonly=readonly)
-
-            @asynccontextmanager
-            async def lifespan(_app: FastMCP) -> AsyncIterator[dict[str, Any]]:
-                yield {
-                    "app_lifespan_context": MainAppContext(
-                        full_confluence_config=fetcher.config, read_only=False
-                    )
-                }
-
-            mcp = FastMCP(name="SpaceAccessTest", lifespan=lifespan)
-            for tool in (
-                get_page,
-                get_labels,
-                get_attachments,
-                download_attachment,
-                download_content_attachments,
-                get_page_images,
-                get_comments,
-                get_space_page_tree,
-                reply_to_comment,
-                add_comment,
-                add_label,
-                create_page,
-                update_page,
-                delete_page,
-                move_page,
-            ):
-                mcp.add_tool(tool)
+            mcp = _server(server_config or fetcher.config)
             # Tools and check_write_access look the fetcher up separately.
             for target in (
                 "mcp_atlassian.servers.confluence.get_confluence_fetcher",
@@ -505,6 +533,16 @@ async def test_get_page_by_title_checks_returned_page_space(
     client = await connect(V1)
     with pytest.raises(ToolError, match="'LEGAL' is blocked"):
         await client.call_tool("get_page", {"title": "Any", "space_key": "ENGX"})
+
+
+@pytest.mark.anyio
+async def test_get_page_by_title_unknown_returned_space_denied(
+    connect: Any, fake: FakeConfluence
+) -> None:
+    """A page returned without a readable space is not served."""
+    client = await connect(V1)
+    with pytest.raises(ToolError, match="Could not determine the space of content"):
+        await client.call_tool("get_page", {"title": "Any", "space_key": "ENGY"})
 
 
 @pytest.mark.anyio
@@ -895,3 +933,271 @@ async def test_reply_to_comment_allowed_space(
     )
     assert json.loads(_text(result))["success"] is True
     assert len(fake.writes) == 1
+
+
+# ---------------------------------------------------------------------------
+# The write guard checks the server's lists as well as the fetcher's.
+# ---------------------------------------------------------------------------
+
+# (page id, blocked list, read-only list, expected error text)
+LISTED_SPACE_CASES = [
+    pytest.param(BLOCKED_PAGE, "LEGAL", None, "'LEGAL' is blocked", id="blocked"),
+    pytest.param(ALLOWED_PAGE, None, "ENG", "'ENG' is read-only", id="readonly"),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", ["delete_page", "add_comment", "add_label"])
+@pytest.mark.parametrize(
+    ("page_id", "blocked", "readonly", "message"), LISTED_SPACE_CASES
+)
+async def test_write_guard_uses_server_lists_when_fetcher_has_none(
+    connect: Any,
+    fake: FakeConfluence,
+    mode: str,
+    tool: str,
+    page_id: str,
+    blocked: str | None,
+    readonly: str | None,
+    message: str,
+) -> None:
+    """A fetcher config without the lists does not weaken check_write_access."""
+    client = await connect(
+        mode,
+        blocked=None,
+        server_config=_config(mode, blocked=blocked, readonly=readonly),
+    )
+    with pytest.raises(ToolError, match=message):
+        await client.call_tool(tool, PAGE_WRITE_TOOLS[tool](page_id))
+    assert fake.writes == []
+
+
+# ---------------------------------------------------------------------------
+# Per-request credentials. get_confluence_fetcher is not patched: it builds a
+# per-request fetcher from the request state set by UserTokenMiddleware.
+# ---------------------------------------------------------------------------
+
+HEADER_PAT = "header-pat"  # X-Atlassian-Confluence-Url + -Personal-Token
+BASIC = "basic"  # Authorization: Basic
+OAUTH = "oauth"  # Authorization: Bearer, server has Cloud OAuth configured
+PAT_BEARER = "pat-bearer"  # Authorization: Bearer, server has no OAuth
+PER_REQUEST_AUTHS = [HEADER_PAT, BASIC, OAUTH, PAT_BEARER]
+
+REQUEST_HEADERS: dict[str, dict[str, str]] = {
+    HEADER_PAT: {
+        "X-Atlassian-Confluence-Url": SERVER_URL,
+        "X-Atlassian-Confluence-Personal-Token": "test-pat-token",
+    },
+    BASIC: {
+        "Authorization": "Basic "
+        + base64.b64encode(b"user@example.com:test-api-token").decode()
+    },
+    OAUTH: {"Authorization": "Bearer test-oauth-token"},
+    PAT_BEARER: {"Authorization": "Bearer test-pat-token"},
+}
+
+
+def _server_config(
+    auth: str, *, blocked: str | None, readonly: str | None
+) -> ConfluenceConfig:
+    """The server's global config for the deployment each auth mode implies."""
+    if auth == OAUTH:
+        return ConfluenceConfig(
+            url=SERVER_URL,
+            auth_type="oauth",
+            oauth_config=OAuthConfig(
+                client_id="test-client-id",
+                client_secret="test-client-secret",
+                redirect_uri="https://localhost/callback",
+                scope="read:confluence-content.all",
+                cloud_id=CLOUD_ID,
+            ),
+            spaces_blocked=blocked,
+            spaces_readonly=readonly,
+        )
+    return _config(V1, blocked=blocked, readonly=readonly)
+
+
+async def _middleware_request(headers: dict[str, str]) -> Request:
+    """Run UserTokenMiddleware over an MCP POST and return the request it forwards."""
+    forwarded: dict[str, Any] = {}
+
+    async def app(scope: Any, _receive: Any, _send: Any) -> None:
+        forwarded["scope"] = scope
+
+    mcp_server = MagicMock()
+    mcp_server.get_streamable_http_path.return_value = "/mcp"
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [
+            (name.lower().encode("latin-1"), value.encode("latin-1"))
+            for name, value in headers.items()
+        ],
+    }
+    await UserTokenMiddleware(app, mcp_server_ref=mcp_server)(
+        scope, AsyncMock(), AsyncMock()
+    )
+    return Request(forwarded["scope"])
+
+
+@pytest.fixture
+async def connect_as(
+    http: None, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[Callable[..., Awaitable[Client]]]:
+    """Yield ``connect_as(auth, blocked=..., readonly=...)`` -> connected client.
+
+    ``with_server_config=False`` models a deployment with no global
+    Confluence config, where only header-based credentials work.
+    """
+    # Lets the middleware's URL check pass without a DNS lookup.
+    monkeypatch.setenv("MCP_ALLOWED_URL_DOMAINS", urlsplit(SERVER_URL).hostname)
+    monkeypatch.delenv("IGNORE_HEADER_AUTH", raising=False)
+    async with AsyncExitStack() as stack:
+
+        async def factory(
+            auth: str,
+            blocked: str | None = "LEGAL",
+            readonly: str | None = None,
+            *,
+            with_server_config: bool = True,
+        ) -> Client:
+            server_config = (
+                _server_config(auth, blocked=blocked, readonly=readonly)
+                if with_server_config
+                else None
+            )
+            request = await _middleware_request(REQUEST_HEADERS[auth])
+            stack.enter_context(
+                patch(
+                    "mcp_atlassian.servers.dependencies.get_http_request",
+                    return_value=request,
+                )
+            )
+            client = Client(transport=FastMCPTransport(_server(server_config)))
+            return await stack.enter_async_context(client)
+
+        yield factory
+
+
+PER_REQUEST_WRITES: dict[str, tuple[str, Callable[[str], dict[str, Any]]]] = {
+    "delete_page": ("delete_page", PAGE_WRITE_TOOLS["delete_page"]),
+    "add_comment": ("add_comment", PAGE_WRITE_TOOLS["add_comment"]),
+    "add_label": ("add_label", PAGE_WRITE_TOOLS["add_label"]),
+    # The page itself lives in OPS; only the new parent is listed.
+    "update_page-parent_id": ("update_page", PARENT_TOOLS["update_page"]),
+    "move_page-target_parent_id": ("move_page", PARENT_TOOLS["move_page"]),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("auth", PER_REQUEST_AUTHS)
+@pytest.mark.parametrize("case", list(PER_REQUEST_WRITES))
+@pytest.mark.parametrize(
+    ("page_id", "blocked", "readonly", "message"), LISTED_SPACE_CASES
+)
+async def test_per_request_auth_writes_denied(
+    connect_as: Any,
+    fake: FakeConfluence,
+    auth: str,
+    case: str,
+    page_id: str,
+    blocked: str | None,
+    readonly: str | None,
+    message: str,
+) -> None:
+    """Server space lists apply whatever credentials the request carries."""
+    client = await connect_as(auth, blocked=blocked, readonly=readonly)
+    tool, arguments = PER_REQUEST_WRITES[case]
+    with pytest.raises(ToolError, match=message):
+        await client.call_tool(tool, arguments(page_id))
+    assert fake.writes == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("auth", PER_REQUEST_AUTHS)
+async def test_per_request_auth_get_labels_blocked_denied(
+    connect_as: Any, fake: FakeConfluence, auth: str
+) -> None:
+    client = await connect_as(auth, blocked="LEGAL")
+    with pytest.raises(ToolError, match="'LEGAL' is blocked"):
+        await client.call_tool("get_labels", {"page_id": BLOCKED_PAGE})
+    assert fake.data_paths() == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("auth", PER_REQUEST_AUTHS)
+async def test_per_request_auth_get_labels_readonly_allowed(
+    connect_as: Any, fake: FakeConfluence, auth: str
+) -> None:
+    client = await connect_as(auth, blocked="LEGAL", readonly="ENG")
+    labels = json.loads(
+        _text(await client.call_tool("get_labels", {"page_id": ALLOWED_PAGE}))
+    )
+    assert [label["name"] for label in labels] == [SECRET_LABEL]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("auth", PER_REQUEST_AUTHS)
+@pytest.mark.parametrize("tool", ["delete_page", "add_label"])
+async def test_per_request_auth_unlisted_space_write_proceeds(
+    connect_as: Any, fake: FakeConfluence, auth: str, tool: str
+) -> None:
+    client = await connect_as(auth, blocked="LEGAL", readonly="ENG")
+    await client.call_tool(tool, PAGE_WRITE_TOOLS[tool](OPS_PAGE))
+    assert len(fake.writes) == 1
+
+
+@pytest.mark.anyio
+async def test_header_pat_without_lists_makes_no_space_lookups(
+    connect_as: Any, fake: FakeConfluence
+) -> None:
+    """With no lists configured the guard adds no requests."""
+    client = await connect_as(HEADER_PAT, blocked=None)
+    await client.call_tool("delete_page", {"page_id": UNRESOLVABLE_PAGE})
+    assert fake.paths == [
+        "/rest/api/user/current",
+        f"/rest/api/content/{UNRESOLVABLE_PAGE}",
+    ]
+    assert fake.writes == [f"DELETE /rest/api/content/{UNRESOLVABLE_PAGE}"]
+
+
+@pytest.mark.anyio
+async def test_header_pat_without_server_config_has_no_lists(
+    connect_as: Any, fake: FakeConfluence
+) -> None:
+    """With no global Confluence config there are no lists to enforce."""
+    client = await connect_as(HEADER_PAT, with_server_config=False)
+    await client.call_tool("delete_page", {"page_id": BLOCKED_PAGE})
+    assert fake.writes == [f"DELETE /rest/api/content/{BLOCKED_PAGE}"]
+
+
+# ---------------------------------------------------------------------------
+# check_confluence_content_space_access
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("space_key", ["", " ", " \t "])
+@pytest.mark.parametrize(
+    ("blocked", "readonly", "operation", "message"),
+    [
+        ("LEGAL", None, "read", "CONFLUENCE_SPACES_BLOCKED is set"),
+        (None, "ENG", "write", "CONFLUENCE_SPACES_READONLY is set"),
+    ],
+    ids=["blocked-read", "readonly-write"],
+)
+def test_blank_space_key_treated_as_unknown(
+    space_key: str,
+    blocked: str | None,
+    readonly: str | None,
+    operation: str,
+    message: str,
+) -> None:
+    """A blank or whitespace-only key cannot be matched, so access fails closed."""
+    config = _config(V1, blocked=blocked, readonly=readonly)
+    with pytest.raises(ProjectAccessError, match=message):
+        check_confluence_content_space_access(
+            config, space_key, content_id="1", write=operation == "write"
+        )

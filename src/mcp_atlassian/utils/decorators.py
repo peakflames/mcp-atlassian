@@ -80,6 +80,7 @@ def check_write_access(func: F) -> F:
             # Late import avoids circular dependency at module load time
             from mcp_atlassian.utils.access_control import (  # noqa: PLC0415
                 ProjectAccessError,
+                check_confluence_content_space_access,
                 check_confluence_space_access,
                 check_jira_project_access,
                 extract_jira_project_key,
@@ -155,10 +156,18 @@ def check_write_access(func: F) -> F:
                     )
 
                     # Fails closed: denied when the page's space cannot be
-                    # determined while a space list applies.
+                    # determined while a space list applies. The space is
+                    # checked against both the server's lists and the
+                    # per-request fetcher's, so a per-request config that
+                    # lacks the lists cannot weaken the check.
                     conf_fetcher = await get_confluence_fetcher(ctx)
+                    content_id = str(page_id)
+                    page_space = conf_fetcher.resolve_content_space_key(content_id)
                     try:
-                        conf_fetcher.check_content_access(str(page_id), write=True)
+                        for config in (conf_config, conf_fetcher.config):
+                            check_confluence_content_space_access(
+                                config, page_space, content_id=content_id, write=True
+                            )
                     except ProjectAccessError as exc:
                         raise ValueError(str(exc)) from exc
 
