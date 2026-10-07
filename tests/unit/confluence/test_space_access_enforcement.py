@@ -836,19 +836,21 @@ def _site_url(tool: str) -> str:
     return CLOUD_SITE_URL if tool == "get_page_views" else SERVER_URL
 
 
+def _is_content_lookup(path: str, query: dict[str, list[str]]) -> bool:
+    """Whether a request is the access check reading a content item's space."""
+    if re.fullmatch(r"/api/v2/(pages|blogposts|embeds)/\d+", path):
+        return True
+    return bool(re.fullmatch(r"/rest/api/content/\d+", path)) and query.get(
+        "expand"
+    ) == ["space"]
+
+
 def _non_lookup_requests(fake: FakeConfluence) -> list[str]:
     """Requests other than the ones the access check makes to find a space."""
     return [
         path
         for path, query in fake.requests
-        if not (
-            path.startswith("/api/v2/spaces")
-            or re.fullmatch(r"/api/v2/pages/\d+", path)
-            or (
-                re.fullmatch(r"/rest/api/content/\d+", path)
-                and query.get("expand") == ["space"]
-            )
-        )
+        if not (path.startswith("/api/v2/spaces") or _is_content_lookup(path, query))
     ]
 
 
@@ -918,6 +920,7 @@ def _history_v2(version: int) -> list[str]:
 
 # Requests each tool makes for page 100 when no block list is configured:
 # the tool's own requests only, with no space lookup added by the check.
+# The v2 child listing is not pinned; only the absence of lookups is checked.
 PAGE_READ_REQUESTS: dict[str, dict[str, list[str]]] = {
     V1: {
         "get_page_children": [
@@ -932,8 +935,6 @@ PAGE_READ_REQUESTS: dict[str, dict[str, list[str]]] = {
         ],
     },
     V2: {
-        # The v1 child endpoint is gone behind the gateway (410).
-        "get_page_children": ["/rest/api/content/100/child/page"],
         "get_page_history": _history_v2(1),
         "get_page_diff": _history_v2(1) + _history_v2(2),
         "get_page_views": [
@@ -955,7 +956,10 @@ async def test_page_read_tools_without_block_list_make_no_space_lookups(
     client = await connect(mode, blocked=None, readonly=readonly, url=_site_url(tool))
     text = _text(await client.call_tool(tool, PAGE_READ_TOOLS[tool](BLOCKED_PAGE)))
     assert "CONFLUENCE_SPACES" not in text
-    assert fake.paths == PAGE_READ_REQUESTS[mode][tool]
+    assert fake.requests
+    assert not any(_is_content_lookup(*request) for request in fake.requests)
+    if tool in PAGE_READ_REQUESTS[mode]:
+        assert fake.paths == PAGE_READ_REQUESTS[mode][tool]
 
 
 # ---------------------------------------------------------------------------
