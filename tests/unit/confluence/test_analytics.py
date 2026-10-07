@@ -27,6 +27,9 @@ class TestAnalyticsMixin:
         mixin.config = mock_config
         mixin.confluence = MagicMock()
         mixin.v2_adapter = None
+        # Provided by ConfluenceClient in the real fetcher; space access
+        # control is covered in test_space_access_enforcement.py.
+        mixin.check_content_access = MagicMock()
 
         # Bind the real methods
         mixin.get_page_views = lambda *args, **kwargs: AnalyticsMixin.get_page_views(
