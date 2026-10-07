@@ -74,6 +74,10 @@ Granular scopes are required for v2 API endpoints (`/api/v2/...`). Classic scope
 | `read:content:confluence` | Tools using v1 `/rest/api/content` |
 | `write:content:confluence` | Write tools using v1 `/rest/api/content` |
 
+<Note>
+`confluence_get_page_children` now returns an `error` object when the lookup fails, for example `"Page not found or not accessible: <page_id>"` on a 404, or an authentication error on 401/403 (such as a missing `read:hierarchical-content:confluence` scope). Earlier versions returned `"count": 0` with an empty `results` list on any failure, which looked the same as a page with no children. The tool also returns an error, rather than a partial list, if it cannot reach the requested items within its request limit. If the server cannot read the space, it still lists the children, without the `space` field.
+</Note>
+
 Make sure `offline_access` is included in `ATLASSIAN_OAUTH_SCOPE` so the server can refresh tokens without requiring users to re-authenticate.
 
 ---
