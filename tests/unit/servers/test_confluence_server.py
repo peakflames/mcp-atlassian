@@ -155,6 +155,8 @@ def mock_confluence_fetcher():
         "message": "Attachment deleted successfully",
     }
     mock_fetcher.fetch_attachment_content.return_value = b"\x89PNG"
+    mock_fetcher._attachment_base_url.return_value = "https://mock.atlassian.net/wiki"
+    mock_fetcher.get_embed_info.return_value = None
 
     # Mock config for tools that need config.url
     mock_config = MagicMock()
@@ -389,6 +391,39 @@ async def test_get_page(client, mock_confluence_fetcher):
     assert "content" in result_data["metadata"]
     assert "value" in result_data["metadata"]["content"]
     assert "This is a test page content" in result_data["metadata"]["content"]["value"]
+
+
+@pytest.mark.anyio
+async def test_get_page_reports_embed(client, mock_confluence_fetcher):
+    """A page ID that is a Smart Link embed returns the embed payload."""
+    error = ValueError("Failed to get page '100': 404 Client Error")
+    mock_confluence_fetcher.get_page_content.side_effect = error
+    mock_confluence_fetcher.get_embed_info.return_value = {
+        "success": False,
+        "content_type": "embed",
+        "embed_url": "https://example.com/d",
+        "error": "Content '100' is a Smart Link embed, not a page.",
+    }
+
+    response = await client.call_tool("confluence_get_page", {"page_id": "100"})
+
+    mock_confluence_fetcher.get_embed_info.assert_called_once_with("100", error)
+    result_data = json.loads(response.content[0].text)
+    assert result_data["content_type"] == "embed"
+    assert result_data["embed_url"] == "https://example.com/d"
+
+
+@pytest.mark.anyio
+async def test_get_page_error_without_embed(client, mock_confluence_fetcher):
+    """A failed page lookup that is not an embed returns the original error."""
+    mock_confluence_fetcher.get_page_content.side_effect = ValueError(
+        "401 Unauthorized"
+    )
+
+    response = await client.call_tool("confluence_get_page", {"page_id": "100"})
+
+    result_data = json.loads(response.content[0].text)
+    assert "401 Unauthorized" in result_data["error"]
 
 
 @pytest.mark.anyio
@@ -831,6 +866,100 @@ async def test_get_page_images_basic(client, mock_confluence_fetcher):
     # Second content is the image
     assert response.content[1].type == "image"
     assert response.content[1].mimeType == "image/png"
+    mock_confluence_fetcher.fetch_attachment_content.assert_called_once_with(
+        "https://mock.atlassian.net/wiki/download/attachments/123/photo.png"
+    )
+
+
+@pytest.mark.anyio
+async def test_get_page_images_uses_gateway_base_url(client, mock_confluence_fetcher):
+    """Relative download links resolve against the fetcher's attachment base URL."""
+    gateway = "https://api.atlassian.com/ex/confluence/cloud-123/wiki"
+    mock_confluence_fetcher._attachment_base_url.return_value = gateway
+    mock_confluence_fetcher.get_content_attachments.return_value = {
+        "success": True,
+        "content_id": "123",
+        "attachments": [
+            {
+                "id": "att1",
+                "title": "photo.png",
+                "type": "attachment",
+                "metadata": {"mediaType": "image/png"},
+                "extensions": {"mediaType": "image/png", "fileSize": 1024},
+                "_links": {"download": "/download/attachments/123/photo.png?version=1"},
+            },
+        ],
+        "total": 1,
+        "start": 0,
+        "limit": 50,
+    }
+
+    await client.call_tool("confluence_get_page_images", {"content_id": "123"})
+
+    mock_confluence_fetcher.fetch_attachment_content.assert_called_once_with(
+        f"{gateway}/download/attachments/123/photo.png?version=1"
+    )
+
+
+@pytest.mark.anyio
+async def test_download_attachment_uses_gateway_base_url(
+    client, mock_confluence_fetcher
+):
+    """download_attachment resolves the relative link against the gateway."""
+    gateway = "https://api.atlassian.com/ex/confluence/cloud-123/wiki"
+    mock_confluence_fetcher._attachment_base_url.return_value = gateway
+    mock_confluence_fetcher._v2_adapter.get_attachment_by_id.return_value = {
+        "id": "att1",
+        "title": "report.pdf",
+        "extensions": {"mediaType": "application/pdf", "fileSize": 4},
+        "_links": {"download": "/download/attachments/123/report.pdf?version=1"},
+    }
+    mock_confluence_fetcher.fetch_attachment_content.return_value = b"%PDF"
+
+    response = await client.call_tool(
+        "confluence_download_attachment", {"attachment_id": "att1"}
+    )
+
+    mock_confluence_fetcher.fetch_attachment_content.assert_called_once_with(
+        f"{gateway}/download/attachments/123/report.pdf?version=1"
+    )
+    assert response.content[0].type == "resource"
+
+
+@pytest.mark.anyio
+async def test_download_content_attachments_uses_gateway_base_url(
+    client, mock_confluence_fetcher
+):
+    """download_content_attachments resolves each link against the gateway."""
+    gateway = "https://api.atlassian.com/ex/confluence/cloud-123/wiki"
+    mock_confluence_fetcher._attachment_base_url.return_value = gateway
+    mock_confluence_fetcher.get_content_attachments.return_value = {
+        "success": True,
+        "content_id": "123",
+        "attachments": [
+            {
+                "id": "att1",
+                "title": "report.pdf",
+                "type": "attachment",
+                "extensions": {"mediaType": "application/pdf", "fileSize": 4},
+                "_links": {
+                    "download": "/download/attachments/123/report.pdf?version=1"
+                },
+            },
+        ],
+        "total": 1,
+        "start": 0,
+        "limit": 50,
+    }
+    mock_confluence_fetcher.fetch_attachment_content.return_value = b"%PDF"
+
+    await client.call_tool(
+        "confluence_download_content_attachments", {"content_id": "123"}
+    )
+
+    mock_confluence_fetcher.fetch_attachment_content.assert_called_once_with(
+        f"{gateway}/download/attachments/123/report.pdf?version=1"
+    )
 
 
 @pytest.mark.anyio

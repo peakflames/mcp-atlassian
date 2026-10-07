@@ -1261,7 +1261,7 @@ class TestPagesOAuthMixin:
 
         # Mock the v2 adapter
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1311,7 +1311,7 @@ class TestPagesOAuthMixin:
 
         # Mock the v2 adapter
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1370,7 +1370,7 @@ class TestPagesOAuthMixin:
 
         # Mock the v2 adapter
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1423,7 +1423,7 @@ class TestPagesOAuthMixin:
 
         # Mock the v2 adapter
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1483,7 +1483,7 @@ class TestPagesOAuthMixin:
 
         # Mock the v2 adapter
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1509,7 +1509,7 @@ class TestPagesOAuthMixin:
 
         # Mock the v2 adapter
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1565,7 +1565,7 @@ class TestPagesOAuthMixin:
         version = 3
 
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1602,7 +1602,7 @@ class TestPagesOAuthMixin:
         version = 1
 
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1639,7 +1639,7 @@ class TestPagesOAuthMixin:
         version = 1
 
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1673,7 +1673,7 @@ class TestPagesOAuthMixin:
         version = 2
 
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -1993,7 +1993,7 @@ class TestPageEmojiOAuth:
         page_id = "oauth_emoji_123"
 
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -2009,7 +2009,7 @@ class TestPageEmojiOAuth:
         page_id = "oauth_get_123"
 
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -2040,7 +2040,7 @@ class TestPageEmojiOAuth:
         page_id = "oauth_set_emoji_123"
 
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter
@@ -2056,7 +2056,7 @@ class TestPageEmojiOAuth:
         page_id = "oauth_remove_emoji_123"
 
         with patch(
-            "mcp_atlassian.confluence.pages.ConfluenceV2Adapter"
+            "mcp_atlassian.confluence.client.ConfluenceV2Adapter"
         ) as mock_v2_adapter_class:
             mock_v2_adapter = MagicMock()
             mock_v2_adapter_class.return_value = mock_v2_adapter

@@ -6,6 +6,7 @@ but still work for API token authentication.
 """
 
 import logging
+import urllib.parse
 from typing import Any
 
 import requests
@@ -253,36 +254,9 @@ class ConfluenceV2Adapter:
             space_id: The space ID to look up
 
         Returns:
-            The space key
-
-        Raises:
-            ValueError: If space not found or API error
+            The space key, or the space ID itself if the key cannot be read
         """
-        try:
-            # Use v2 spaces endpoint to get space key
-            url = f"{self.base_url}/api/v2/spaces/{space_id}"
-
-            response = self.session.get(url)
-            response.raise_for_status()
-
-            data = response.json()
-            space_key = data.get("key")
-
-            if not space_key:
-                raise ValueError(f"No key found for space ID '{space_id}'")
-
-            return space_key
-
-        except Exception as e:
-            if isinstance(e, HTTPError) and e.response is not None:
-                logger.error(
-                    f"HTTP error getting space key for ID '{space_id}': {e}\n"
-                    f"Response: {e.response.text}"
-                )
-            else:
-                logger.error(f"Error getting space key for ID '{space_id}': {e}")
-            # Return the space_id as fallback
-            return space_id
+        return self.get_space_key(space_id) or space_id
 
     def get_page(
         self,
@@ -1128,3 +1102,152 @@ class ConfluenceV2Adapter:
             "version": v2_attachment.get("version", {}),
             "_links": v2_attachment.get("_links", {}),
         }
+
+    def get_embed(self, embed_id: str) -> dict[str, Any] | None:
+        """Get a Smart Link embed (content type ``embed``) using v2 API.
+
+        Embeds live in the content tree alongside pages and folders but point
+        at an external URL (``embedUrl``). They have no body and no attachments,
+        so page and attachment endpoints return 404 for them.
+
+        Args:
+            embed_id: The content ID to look up
+
+        Returns:
+            The v2 embed object, or None if the ID is not an embed or cannot
+            be read (e.g. the token lacks the ``read:embed:confluence`` scope).
+        """
+        url = f"{self.base_url}/api/v2/embeds/{embed_id}"
+        try:
+            response = self.session.get(url)
+        except requests.RequestException as e:
+            logger.debug(f"Embed lookup for '{embed_id}' failed: {e}")
+            return None
+
+        if response.status_code == 200:
+            try:
+                data = response.json()
+            except ValueError as e:
+                logger.debug(f"Embed lookup for '{embed_id}' returned non-JSON: {e}")
+                return None
+            return data if isinstance(data, dict) else None
+        if response.status_code in (401, 403):
+            logger.warning(
+                f"Could not read embed '{embed_id}' (HTTP {response.status_code}); "
+                "the OAuth app may be missing the read:embed:confluence scope"
+            )
+        return None
+
+    def get_content_labels(self, content_id: str) -> dict[str, Any]:
+        """Get labels for a page, blog post, or attachment using v2 API.
+
+        The v1 ``/rest/api/content/{id}/label`` endpoint is no longer served
+        through the OAuth API gateway. Attachment IDs (``att`` prefix) use the
+        attachments endpoint; other IDs try pages first, then blog posts.
+
+        Args:
+            content_id: The content ID
+
+        Returns:
+            v1-compatible dictionary with a ``results`` list of labels
+
+        Raises:
+            HTTPError: If the API request fails with 401/403
+            ValueError: If the content is not found or other errors
+        """
+        if content_id.startswith("att"):
+            content_types = ["attachments"]
+        else:
+            content_types = ["pages", "blogposts"]
+
+        for index, content_type in enumerate(content_types):
+            url = f"{self.base_url}/api/v2/{content_type}/{content_id}/labels"
+            try:
+                labels = self._get_all_results(url)
+            except HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status in (401, 403):
+                    logger.error(
+                        f"Authentication error getting labels for '{content_id}': {e}"
+                    )
+                    raise
+                if status == 404 and index < len(content_types) - 1:
+                    continue
+                msg = f"Failed to get labels for content '{content_id}': {e}"
+                raise ValueError(msg) from e
+            except Exception as e:
+                msg = f"Failed to get labels for content '{content_id}': {e}"
+                raise ValueError(msg) from e
+
+            return {
+                "results": [
+                    {
+                        "id": label.get("id"),
+                        "name": label.get("name"),
+                        "prefix": label.get("prefix", "global"),
+                        "label": label.get("name"),
+                    }
+                    for label in labels
+                ]
+            }
+
+        return {"results": []}
+
+    def _get_all_results(
+        self, url: str, limit: int = 250, max_pages: int = 20
+    ) -> list[dict[str, Any]]:
+        """Collect ``results`` from a cursor-paginated v2 list endpoint.
+
+        Args:
+            url: The v2 list endpoint URL
+            limit: Page size to request
+            max_pages: Safety cap on the number of pages fetched
+
+        Returns:
+            Combined list of result objects
+
+        Raises:
+            HTTPError: If any request fails
+        """
+        results: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"limit": limit}
+        for _ in range(max_pages):
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            results.extend(data.get("results", []))
+
+            next_link = data.get("_links", {}).get("next")
+            if not next_link:
+                break
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(next_link).query)
+            cursor = query.get("cursor", [None])[0]
+            if not cursor:
+                break
+            params = {"limit": limit, "cursor": cursor}
+        else:
+            logger.warning(
+                f"Stopped after {max_pages} pages ({len(results)} results) from "
+                f"{url}; remaining results were not fetched"
+            )
+        return results
+
+    def get_space_key(self, space_id: str) -> str | None:
+        """Get a space key from its ID, without falling back to the ID.
+
+        Args:
+            space_id: The space ID to look up
+
+        Returns:
+            The space key, or None if the space cannot be read
+        """
+        url = f"{self.base_url}/api/v2/spaces/{space_id}"
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(f"Could not read space '{space_id}': {e}")
+            return None
+        key = data.get("key") if isinstance(data, dict) else None
+        return str(key) if key else None

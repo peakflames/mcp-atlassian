@@ -12,26 +12,12 @@ from ..utils.access_control import ProjectAccessError, check_confluence_space_ac
 from ..utils.decorators import handle_auth_errors
 from .client import ConfluenceClient
 from .utils import emoji_to_hex_id, extract_emoji_from_property
-from .v2_adapter import ConfluenceV2Adapter
 
 logger = logging.getLogger("mcp-atlassian")
 
 
 class PagesMixin(ConfluenceClient):
     """Mixin for Confluence page operations."""
-
-    @property
-    def _v2_adapter(self) -> ConfluenceV2Adapter | None:
-        """Get v2 API adapter for OAuth authentication.
-
-        Returns:
-            ConfluenceV2Adapter instance if OAuth is configured, None otherwise
-        """
-        if self.config.auth_type == "oauth" and self.config.is_cloud:
-            return ConfluenceV2Adapter(
-                session=self.confluence._session, base_url=self.confluence.url
-            )
-        return None
 
     def get_page_space_key(self, page_id: str) -> str | None:
         """Return the space key for a page without fetching full content.
