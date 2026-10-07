@@ -7,6 +7,26 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+### Fixes
+
+- Fix `confluence_get_page_children` under Cloud OAuth: children are listed via
+  the v2 `/api/v2/pages/{id}/direct-children` endpoint (keeping `page` and,
+  with `include_folders`, `folder` items) instead of the v1
+  `/rest/api/content/{id}/child/{type}` endpoints, which the gateway is
+  removing (upstream issue #1598). When `expand` includes `version` or `body`,
+  child pages are looked up in one `/api/v2/pages?id=...` request. On this
+  path `start`/`limit` apply to pages and folders together, other `expand`
+  fields are ignored, and folders carry no version. Server/Data Center and
+  non-OAuth Cloud still use v1 (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/confluence/v2_adapter.py`). Requires the
+  `read:hierarchical-content:confluence` scope, plus `read:page:confluence`
+  for versions and content.
+- `confluence_get_page_children` no longer reports a failed lookup as an
+  empty list of children. The fetcher raises, and the tool returns an
+  `error` object; 401/403 is reported as an authentication failure
+  (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/servers/confluence.py`).
+
 ## v0.21.2-peakflames.5
 
 ### Fixes
