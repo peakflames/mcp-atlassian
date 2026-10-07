@@ -7,6 +7,41 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+### Fixes
+
+- `confluence_get_labels`, `confluence_get_attachments`,
+  `confluence_download_attachment`, `confluence_download_content_attachments`,
+  and `confluence_get_page_images` now enforce `CONFLUENCE_SPACES_BLOCKED`.
+  The content's space is checked before labels, attachment metadata, or file
+  contents are returned.
+- `confluence_add_label`, `confluence_upload_attachment`,
+  `confluence_upload_attachments`, and `confluence_delete_attachment` now
+  enforce `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY` for the
+  target content.
+- `confluence_reply_to_comment` now enforces `CONFLUENCE_SPACES_BLOCKED` and
+  `CONFLUENCE_SPACES_READONLY`, based on the space of the page or blog post
+  the comment belongs to.
+- `confluence_get_page` now fails closed when a block list is set and the
+  page's space cannot be determined. It also enforces
+  `CONFLUENCE_SPACES_BLOCKED` when called with `title` and `space_key`.
+
+### Behaviour changes
+
+- Content-level writes (labels, attachments, comment replies) now also
+  enforce `CONFLUENCE_SPACES_READONLY` when only a read-only list is set.
+
+### Notes
+
+- With no space lists configured, these checks make no extra requests.
+- With a block list set, a request is denied when the content's space cannot
+  be determined. The error names `CONFLUENCE_SPACES_BLOCKED`.
+- Under Cloud OAuth, the space check needs the `read:space:confluence` scope
+  plus read access to the content (page, blog post, attachment, or comment).
+  Without them, requests are denied while a block list is set.
+- Embed IDs passed to the label and attachment tools now return the
+  access-control error instead of a 404 when their space is blocked or cannot
+  be determined.
+
 ## v0.21.2-peakflames.5
 
 ### Fixes
