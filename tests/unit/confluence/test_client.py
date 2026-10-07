@@ -361,12 +361,15 @@ def test_confluence_fetcher_has_attachment_methods():
 def test_confluence_fetcher_attachment_method_calls():
     """Test that attachment methods can be called through ConfluenceFetcher."""
     with (
-        patch("mcp_atlassian.confluence.client.ConfluenceConfig.from_env"),
+        patch(
+            "mcp_atlassian.confluence.client.ConfluenceConfig.from_env"
+        ) as mock_from_env,
         patch("mcp_atlassian.confluence.client.Confluence") as mock_confluence_class,
         patch("mcp_atlassian.preprocessing.confluence.ConfluencePreprocessor"),
         patch("mcp_atlassian.confluence.client.configure_ssl_verification"),
     ):
-        # Setup mocks
+        # Setup mocks. No space block list is configured.
+        mock_from_env.return_value.spaces_blocked_set = frozenset()
         mock_confluence = mock_confluence_class.return_value
         mock_session = MagicMock()
         mock_response = MagicMock()

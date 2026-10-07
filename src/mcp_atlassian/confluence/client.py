@@ -10,7 +10,11 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import HTTPError
 
 from ..exceptions import MCPAtlassianAuthenticationError
-from ..utils.access_control import ProjectAccessError, check_confluence_space_access
+from ..utils.access_control import (
+    ProjectAccessError,
+    check_confluence_content_space_access,
+    check_confluence_space_access,
+)
 from ..utils.logging import get_masked_session_headers, log_config_param, mask_sensitive
 from ..utils.oauth import configure_oauth_session
 from ..utils.ssl import configure_ssl_verification
@@ -214,6 +218,65 @@ class ConfluenceClient:
                 return current.response.status_code == 404
             current = current.__cause__ or current.__context__
         return False
+
+    def resolve_content_space_key(
+        self, content_id: str, *, is_comment: bool = False
+    ) -> str | None:
+        """Resolve the space key of a page, blog post, attachment, or comment.
+
+        Used only by access-control checks. Returns None when the key cannot
+        be determined.
+
+        Args:
+            content_id: The content ID to resolve
+            is_comment: Whether ``content_id`` is a comment. The v2 API serves
+                comments from their own endpoints; v1 treats them as content.
+
+        Returns:
+            The space key, or None if it cannot be determined
+        """
+        adapter = self._v2_adapter
+        if adapter is not None:
+            if is_comment:
+                return adapter.get_comment_space_key(content_id)
+            return adapter.get_content_space_key(content_id)
+        try:
+            content = self.confluence.get_page_by_id(page_id=content_id, expand="space")
+        except Exception as e:  # noqa: BLE001 - any failure means "unknown"
+            logger.warning(f"Could not resolve the space of '{content_id}': {e}")
+            return None
+        space = content.get("space") if isinstance(content, dict) else None
+        key = space.get("key") if isinstance(space, dict) else None
+        return str(key) if key else None
+
+    def check_content_access(
+        self, content_id: str, *, write: bool = False, is_comment: bool = False
+    ) -> None:
+        """Enforce per-space access control for a content ID.
+
+        Reads are checked against ``CONFLUENCE_SPACES_BLOCKED``; writes are
+        also checked against ``CONFLUENCE_SPACES_READONLY``. Does nothing, and
+        makes no request, when no relevant list is configured. If the space
+        cannot be determined, access is denied when a block list is set and
+        allowed otherwise.
+
+        Args:
+            content_id: A page, blog post, attachment, or comment ID
+            write: ``True`` for mutation operations
+            is_comment: Whether ``content_id`` is a comment
+
+        Raises:
+            ProjectAccessError: If access is denied.
+        """
+        if not (
+            self.config.spaces_blocked_set
+            or (write and self.config.spaces_readonly_set)
+        ):
+            return
+        space_key = self.resolve_content_space_key(content_id, is_comment=is_comment)
+        check_confluence_content_space_access(
+            self.config, space_key, content_id=content_id, write=write
+        )
 
     def _embed_space_allowed(
         self, adapter: ConfluenceV2Adapter, embed: dict[str, Any]

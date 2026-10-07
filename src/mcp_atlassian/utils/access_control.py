@@ -97,3 +97,39 @@ def check_confluence_space_access(
             f"Space '{space_key}' is read-only by configuration "
             "(CONFLUENCE_SPACES_READONLY). Write operations are not permitted."
         )
+
+
+def check_confluence_content_space_access(
+    config: ConfluenceConfig,
+    space_key: str | None,
+    *,
+    content_id: str,
+    write: bool,
+) -> None:
+    """Check access to content whose space key may not be known.
+
+    Fails closed: when ``config.spaces_blocked_set`` is non-empty and
+    ``space_key`` is ``None`` or empty, access is denied because the content
+    might live in a blocked space. When the space key is known, this behaves
+    like :func:`check_confluence_space_access`. When no block list is
+    configured and the key is unknown, this is a no-op.
+
+    Args:
+        config: The :class:`ConfluenceConfig` holding the access-control sets.
+        space_key: The resolved space key, or ``None`` if it could not be
+            resolved. Never pass a space ID here.
+        content_id: The content ID, used in the error message.
+        write: ``True`` for mutation operations, ``False`` for read operations.
+
+    Raises:
+        ProjectAccessError: If access is denied.
+    """
+    if not space_key:
+        if config.spaces_blocked_set:
+            msg = (
+                f"Could not determine the space of content '{content_id}'; "
+                "access is denied because CONFLUENCE_SPACES_BLOCKED is set."
+            )
+            raise ProjectAccessError(msg)
+        return
+    check_confluence_space_access(config, space_key, write=write)
