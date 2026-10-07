@@ -282,6 +282,32 @@ async def test_check_write_access_batch_rejects_blocked_project():
         await tool_fn(ctx, **kwargs)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_key", [" PRIV", "PRIV ", " priv "])
+async def test_check_write_access_strips_direct_project_key(project_key):
+    """A direct project_key is compared after trimming whitespace.
+
+    Calls the real create_issue tool function; the MCP schema pattern on
+    ``project_key`` is not applied on this path, so the guard itself is tested.
+    """
+    from mcp_atlassian.servers.jira import create_issue
+
+    ctx = ContextWithAccess(jira_config=_make_jira_config(projects_blocked="PRIV"))
+    with pytest.raises(ToolError, match="blocked"):
+        await create_issue.fn(
+            ctx, project_key=project_key, summary="s", issue_type="Task"
+        )
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_rejects_non_key_direct_project_key():
+    from mcp_atlassian.servers.jira import create_issue
+
+    ctx = ContextWithAccess(jira_config=_make_jira_config(projects_blocked="PRIV"))
+    with pytest.raises(ToolError, match="Cannot determine the Jira project"):
+        await create_issue.fn(ctx, project_key="10000", summary="s", issue_type="Task")
+
+
 # ---------------------------------------------------------------------------
 # Guard kwarg names vs. real tool signatures (mechanical audit)
 # ---------------------------------------------------------------------------
@@ -419,9 +445,12 @@ _GUARD_KWARG_TARGETS: dict[str, tuple[str, set[str]]] = {
     "page_id": ("confluence", {"update_page", "delete_page", "move_page"}),
 }
 
-# Parameters on Jira write tools that carry no project-derivable value.
-_JIRA_NON_PROJECT_ID_PARAMS = {"board_id", "sprint_id", "link_id", "comment_id"}
-_JIRA_NON_PROJECT_ID_PARAMS |= {"form_id", "transition_id", "account_id"}
+# ID parameters on Jira write tools that name something inside the issue the
+# tool already identifies by issue_key, or a user; no separate project.
+_JIRA_NON_PROJECT_ID_PARAMS = {"comment_id", "form_id", "transition_id", "account_id"}
+
+# Project resolved only via an API lookup; not checked by the guard.
+_JIRA_LOOKUP_ONLY_PARAMS_KNOWN_GAP = {"board_id", "sprint_id", "link_id"}
 
 
 def _all_guarded_tools() -> dict[str, dict[str, set[str]]]:
@@ -476,9 +505,21 @@ def test_jira_write_tool_key_params_are_read_by_guard():
             }
             if key_like and param not in guard_names:
                 unguarded.append(f"{tool_name}.{param}")
-            if param.endswith("_id") and param not in _JIRA_NON_PROJECT_ID_PARAMS:
+            classified = (
+                _JIRA_NON_PROJECT_ID_PARAMS | _JIRA_LOOKUP_ONLY_PARAMS_KNOWN_GAP
+            )
+            if param.endswith("_id") and param not in classified:
                 unguarded.append(f"{tool_name}.{param} (unclassified id)")
     assert not unguarded, f"key-bearing parameters not read by the guard: {unguarded}"
+
+
+def test_jira_id_param_sets_match_write_tools():
+    """Every classified ID parameter still exists on some Jira write tool."""
+    all_params = set().union(*_all_guarded_tools()["jira"].values())
+    stale = sorted(
+        (_JIRA_NON_PROJECT_ID_PARAMS | _JIRA_LOOKUP_ONLY_PARAMS_KNOWN_GAP) - all_params
+    )
+    assert not stale, f"classified ID parameters no write tool has: {stale}"
 
 
 @pytest.mark.asyncio

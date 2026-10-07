@@ -74,8 +74,9 @@ def _response(method: str, url: str, status: int, payload: Any) -> requests.Resp
 class FakeJiraHTTP:
     """Records every request and returns minimal Jira-shaped responses."""
 
-    def __init__(self) -> None:
+    def __init__(self, field_defs: list[dict[str, Any]] | None = None) -> None:
         self.calls: list[tuple[str, str, Any]] = []
+        self.field_defs = field_defs or []
 
     def __call__(
         self, _session: requests.Session, method: str, url: str, **kwargs: Any
@@ -91,7 +92,11 @@ class FakeJiraHTTP:
         self.calls.append((method, "/" + path, body))
 
         if method == "GET" and path.endswith("rest/api/2/field"):
-            return _response(method, url, 200, [])
+            return _response(method, url, 200, self.field_defs)
+        if method == "POST" and path.endswith("rest/api/2/issue"):
+            project = (body or {}).get("fields", {}).get("project", {})
+            key = f"{project.get('key', 'X')}-1" if isinstance(project, dict) else "X-1"
+            return _response(method, url, 201, {"id": "10001", "key": key})
         if method == "POST" and path.endswith("rest/api/2/issue/bulk"):
             created = [
                 {"id": str(i), "key": f"{u['fields']['project']['key']}-{i + 1}"}
@@ -138,9 +143,12 @@ def _make_server(config: JiraConfig) -> FastMCP:
 
 
 async def _call(
-    config: JiraConfig, tool: str, args: dict[str, Any]
+    config: JiraConfig,
+    tool: str,
+    args: dict[str, Any],
+    field_defs: list[dict[str, Any]] | None = None,
 ) -> tuple[FakeJiraHTTP, Any, Exception | None]:
-    fake = FakeJiraHTTP()
+    fake = FakeJiraHTTP(field_defs)
     result: Any = None
     error: Exception | None = None
     with patch.object(requests.Session, "request", autospec=True, side_effect=fake):
@@ -460,3 +468,261 @@ async def test_numeric_sprint_issue_id_allowed_without_lists():
     assert fake.writes == [
         ("POST", "/rest/agile/1.0/sprint/7/issue", {"issues": ["10001"]})
     ]
+
+
+# ---------------------------------------------------------------------------
+# Epic link aliases, each in `fields` and `additional_fields`
+# ---------------------------------------------------------------------------
+
+EPIC_ALIASES = ["epicKey", "epic_link", "epicLink", "Epic Link"]
+
+# (tool, JSON argument carrying the alias, other required arguments)
+EPIC_ALIAS_TARGETS = [
+    ("update_issue", "fields", {"issue_key": "SAFE-1"}),
+    (
+        "update_issue",
+        "additional_fields",
+        {"issue_key": "SAFE-1", "fields": json.dumps({"summary": "x"})},
+    ),
+    (
+        "create_issue",
+        "additional_fields",
+        {"project_key": "SAFE", "summary": "s", "issue_type": "Task"},
+    ),
+    ("transition_issue", "fields", {"issue_key": "SAFE-1", "transition_id": "31"}),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("alias", EPIC_ALIASES)
+@pytest.mark.parametrize(
+    ("tool", "json_arg", "base_args"),
+    EPIC_ALIAS_TARGETS,
+    ids=[f"{t}-{a}" for t, a, _ in EPIC_ALIAS_TARGETS],
+)
+@pytest.mark.parametrize(
+    ("epic_project", "match"),
+    [(BLOCKED, "blocked"), (READONLY, "read-only")],
+    ids=["blocked", "readonly"],
+)
+async def test_epic_link_alias_denied(
+    alias, tool, json_arg, base_args, epic_project, match
+):
+    args = {**base_args, json_arg: json.dumps({alias: f"{epic_project}-500"})}
+    fake, _, error = await _call(_make_config(), tool, args)
+    _assert_denied(fake, error, match)
+
+
+# ---------------------------------------------------------------------------
+# Surrounding whitespace and non-key project values
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "args", "match"),
+    [
+        (
+            "batch_create_issues",
+            _batch(_item("SAFE"), _item(f" {BLOCKED}")),
+            "blocked",
+        ),
+        (
+            "batch_create_issues",
+            _batch(_item("SAFE", project={"key": f" {READONLY} "})),
+            "read-only",
+        ),
+        (
+            "create_issue",
+            {
+                "project_key": "SAFE",
+                "summary": "s",
+                "issue_type": "Task",
+                "additional_fields": json.dumps({"project": {"key": f"{BLOCKED} "}}),
+            },
+            "blocked",
+        ),
+        (
+            "create_issue",
+            {
+                "project_key": "SAFE",
+                "summary": "s",
+                "issue_type": "Task",
+                "additional_fields": json.dumps({"project": f" {BLOCKED}"}),
+            },
+            "blocked",
+        ),
+    ],
+    ids=[
+        "batch-project_key",
+        "batch-project-field",
+        "create-project-dict",
+        "create-project-string",
+    ],
+)
+async def test_whitespace_around_project_key_denied(tool, args, match):
+    fake, _, error = await _call(_make_config(), tool, args)
+    _assert_denied(fake, error, match)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        (
+            "create_issue",
+            {
+                "project_key": "SAFE",
+                "summary": "s",
+                "issue_type": "Task",
+                "additional_fields": json.dumps({"project": "10000"}),
+            },
+        ),
+        ("batch_create_issues", _batch(_item("SAFE", project="10000"))),
+        ("batch_create_issues", _batch(_item("10000"))),
+    ],
+    ids=["create-project-string", "batch-project-field", "batch-project_key"],
+)
+async def test_non_key_project_value_denied(tool, args):
+    fake, _, error = await _call(_make_config(), tool, args)
+    _assert_denied(fake, error, "Cannot determine the Jira project")
+
+
+# ---------------------------------------------------------------------------
+# Realistic field map: denied values really reach the write payload
+# ---------------------------------------------------------------------------
+
+REALISTIC_FIELDS: list[dict[str, Any]] = [
+    {
+        "id": "summary",
+        "name": "Summary",
+        "custom": False,
+        "schema": {"type": "string", "system": "summary"},
+    },
+    {
+        "id": "issuetype",
+        "name": "Issue Type",
+        "custom": False,
+        "schema": {"type": "issuetype", "system": "issuetype"},
+    },
+    {
+        "id": "project",
+        "name": "Project",
+        "custom": False,
+        "schema": {"type": "project", "system": "project"},
+    },
+    {
+        "id": "parent",
+        "name": "Parent",
+        "custom": False,
+        "schema": {"type": "issuelink", "system": "parent"},
+    },
+    {
+        "id": "customfield_10014",
+        "name": "Epic Link",
+        "custom": True,
+        "schema": {
+            "type": "any",
+            "custom": "com.pyxis.greenhopper.jira:gh-epic-link",
+            "customId": 10014,
+        },
+    },
+]
+
+_CREATE = {"project_key": "SAFE", "summary": "s", "issue_type": "Task"}
+
+# (tool, args, write method, write path, path into the body, expected value)
+PAYLOAD_CASES = [
+    (
+        "create_issue",
+        {**_CREATE, "additional_fields": json.dumps({"project": {"key": BLOCKED}})},
+        "POST",
+        "/rest/api/2/issue",
+        ["fields", "project"],
+        {"key": BLOCKED},
+    ),
+    (
+        "create_issue",
+        {**_CREATE, "additional_fields": json.dumps({"parent": f"{BLOCKED}-1"})},
+        "POST",
+        "/rest/api/2/issue",
+        ["fields", "parent"],
+        {"key": f"{BLOCKED}-1"},
+    ),
+    (
+        "update_issue",
+        {
+            "issue_key": "SAFE-1",
+            "fields": json.dumps({"summary": "x"}),
+            "additional_fields": json.dumps({"Epic Link": f"{BLOCKED}-500"}),
+        },
+        "PUT",
+        "/rest/api/2/issue/SAFE-1",
+        ["fields", "customfield_10014"],
+        f"{BLOCKED}-500",
+    ),
+    (
+        "update_issue",
+        {"issue_key": "SAFE-1", "fields": json.dumps({"parent": f"{BLOCKED}-9"})},
+        "PUT",
+        "/rest/api/2/issue/SAFE-1",
+        ["fields", "parent"],
+        {"key": f"{BLOCKED}-9"},
+    ),
+    (
+        "batch_create_issues",
+        _batch(_item("SAFE", **{"Epic Link": f"{BLOCKED}-500"})),
+        "POST",
+        "/rest/api/2/issue/bulk",
+        ["issueUpdates", 0, "fields", "customfield_10014"],
+        f"{BLOCKED}-500",
+    ),
+    (
+        "batch_create_issues",
+        _batch(_item("SAFE", project={"key": BLOCKED})),
+        "POST",
+        "/rest/api/2/issue/bulk",
+        ["issueUpdates", 0, "fields", "project"],
+        {"key": BLOCKED},
+    ),
+]
+
+
+def _dig(body: Any, path: list[Any]) -> Any:
+    for part in path:
+        body = body[part]
+    return body
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "args", "method", "write_path", "body_path", "expected"),
+    PAYLOAD_CASES,
+    ids=[
+        "create-project",
+        "create-parent",
+        "update-epic-link-field",
+        "update-parent",
+        "batch-epic-link-field",
+        "batch-project",
+    ],
+)
+async def test_denied_reference_reaches_payload_without_lists(
+    tool, args, method, write_path, body_path, expected
+):
+    """With a realistic field map, the denied value is in the write payload.
+
+    The same call is denied with lists configured, and with no lists it sends
+    a write whose payload carries the referenced project or issue.
+    """
+    fake, _, error = await _call(
+        _make_config(), tool, args, field_defs=REALISTIC_FIELDS
+    )
+    _assert_denied(fake, error, "blocked")
+
+    fake, _, _ = await _call(
+        _make_config(None, None), tool, args, field_defs=REALISTIC_FIELDS
+    )
+    matching = [b for m, p, b in fake.writes if m == method and p == write_path]
+    assert matching, f"no {method} {write_path} sent: {fake.calls}"
+    assert any(_dig(b, body_path) == expected for b in matching), matching

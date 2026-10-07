@@ -31,6 +31,7 @@ JIRA_GUARD_ISSUE_KEY_LIST_KWARGS: tuple[str, ...] = ("issue_keys",)
 JIRA_GUARD_FIELDS_KWARGS: tuple[str, ...] = ("fields", "additional_fields")
 JIRA_GUARD_BATCH_ISSUES_KWARGS: tuple[str, ...] = ("issues",)
 
+_JIRA_PROJECT_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _JIRA_ISSUE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
 # Field names the Jira fetcher accepts as an epic link (see jira/issues.py).
 _JIRA_EPIC_LINK_ALIASES = frozenset({"epickey", "epic_link", "epiclink", "epic link"})
@@ -43,6 +44,14 @@ def _unresolved_jira_reference(value: Any, source: str) -> ValueError:
         "JIRA_PROJECTS_READONLY), so references must use project keys "
         "(e.g. 'PROJ') or issue keys (e.g. 'PROJ-123')."
     )
+
+
+def _jira_project_key(value: Any, source: str) -> str:
+    """Return a stripped project key, or raise if the value is not a key."""
+    text = str(value).strip()
+    if not _JIRA_PROJECT_KEY_RE.match(text):
+        raise _unresolved_jira_reference(value, source)
+    return text
 
 
 def _jira_project_from_issue_ref(ref: Any, source: str) -> str:
@@ -76,18 +85,16 @@ def _jira_projects_from_fields(fields: dict[str, Any], source: str) -> list[str]
         if value is None or value == "":
             continue
         lname = name.lower()
+        if lname not in ("project", "parent") and lname not in _JIRA_EPIC_LINK_ALIASES:
+            continue
+        where = f"{source}.{name}"
+        ref = value.get("key") if isinstance(value, dict) else value
+        if not isinstance(ref, str):
+            raise _unresolved_jira_reference(value, where)
         if lname == "project":
-            if isinstance(value, dict) and value.get("key"):
-                keys.append(str(value["key"]))
-            elif isinstance(value, str):
-                keys.append(value)
-            else:
-                raise _unresolved_jira_reference(value, f"{source}.{name}")
-        elif lname == "parent" or lname in _JIRA_EPIC_LINK_ALIASES:
-            ref = value.get("key") if isinstance(value, dict) else value
-            if not isinstance(ref, str):
-                raise _unresolved_jira_reference(value, f"{source}.{name}")
-            keys.append(_jira_project_from_issue_ref(ref, f"{source}.{name}"))
+            keys.append(_jira_project_key(ref, where))
+        else:
+            keys.append(_jira_project_from_issue_ref(ref, where))
     return keys
 
 
@@ -174,7 +181,9 @@ def check_write_access(func: F) -> F:
                 for kw in JIRA_GUARD_PROJECT_KEY_KWARGS:
                     direct_project_key = kwargs.get(kw)
                     if direct_project_key:
-                        project_keys_to_check.append(str(direct_project_key))
+                        project_keys_to_check.append(
+                            _jira_project_key(direct_project_key, kw)
+                        )
 
                 # Single issue keys (incl. both ends of a link and the epic)
                 for kw in JIRA_GUARD_ISSUE_KEY_KWARGS:
@@ -220,7 +229,9 @@ def check_write_access(func: F) -> F:
                             continue
                         batch_pk = item.get("project_key")
                         if batch_pk:
-                            project_keys_to_check.append(str(batch_pk))
+                            project_keys_to_check.append(
+                                _jira_project_key(batch_pk, f"{kw}[{idx}].project_key")
+                            )
                         project_keys_to_check.extend(
                             _jira_projects_from_fields(item, f"{kw}[{idx}]")
                         )

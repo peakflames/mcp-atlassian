@@ -20,8 +20,10 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
     `project`, `parent` and epic-link (`epicKey`, `epic_link`, `epicLink`,
     `Epic Link`) entries in `fields` / `additional_fields`.
   - While either list is set, a reference whose project cannot be determined
-    (a numeric issue ID, or a `project` given only by ID) is rejected. Epic
-    links set through a raw `customfield_*` ID are not inspected.
+    (a numeric issue ID, or a `project` given by ID or by any value that is
+    not a project key) is rejected.
+  - Project and issue keys are compared after trimming surrounding
+    whitespace.
 - Tests now check that every argument name the guard reads exists on the
   write tools it is meant for, and that key-bearing parameters on Jira write
   tools are read by the guard.
