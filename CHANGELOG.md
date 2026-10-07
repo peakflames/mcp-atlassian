@@ -14,6 +14,8 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
   and `confluence_get_page_images` now enforce `CONFLUENCE_SPACES_BLOCKED`.
   The content's space is checked before labels, attachment metadata, or file
   contents are returned.
+- `confluence_get_comments` and `confluence_get_space_page_tree` now enforce
+  `CONFLUENCE_SPACES_BLOCKED`.
 - `confluence_add_label`, `confluence_upload_attachment`,
   `confluence_upload_attachments`, and `confluence_delete_attachment` now
   enforce `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY` for the
@@ -21,14 +23,25 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 - `confluence_reply_to_comment` now enforces `CONFLUENCE_SPACES_BLOCKED` and
   `CONFLUENCE_SPACES_READONLY`, based on the space of the page or blog post
   the comment belongs to.
+- Write tools that take a page ID (`confluence_update_page`,
+  `confluence_delete_page`, `confluence_move_page`, `confluence_add_comment`,
+  and `confluence_add_label`) now enforce `CONFLUENCE_SPACES_BLOCKED` and
+  `CONFLUENCE_SPACES_READONLY` for the page's space, and are denied when that
+  space cannot be determined while either list is set.
 - `confluence_get_page` now fails closed when a block list is set and the
-  page's space cannot be determined. It also enforces
-  `CONFLUENCE_SPACES_BLOCKED` when called with `title` and `space_key`.
+  page's space cannot be determined. When called with `title` and
+  `space_key`, it enforces `CONFLUENCE_SPACES_BLOCKED` for both the requested
+  space key and the space of the page that is returned.
+- Space keys are compared against `CONFLUENCE_SPACES_BLOCKED` and
+  `CONFLUENCE_SPACES_READONLY` ignoring case and surrounding whitespace, the
+  same way the lists themselves are read.
 
 ### Behaviour changes
 
 - Content-level writes (labels, attachments, comment replies) now also
   enforce `CONFLUENCE_SPACES_READONLY` when only a read-only list is set.
+- Writes are denied when `CONFLUENCE_SPACES_READONLY` is set and the target's
+  space cannot be determined, even if no block list is set.
 
 ### Notes
 
@@ -37,7 +50,7 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
   be determined. The error names `CONFLUENCE_SPACES_BLOCKED`.
 - Under Cloud OAuth, the space check needs the `read:space:confluence` scope
   plus read access to the content (page, blog post, attachment, or comment).
-  Without them, requests are denied while a block list is set.
+  Without them, checked requests are denied while a relevant list is set.
 - Embed IDs passed to the label and attachment tools now return the
   access-control error instead of a 404 when their space is blocked or cannot
   be determined.
