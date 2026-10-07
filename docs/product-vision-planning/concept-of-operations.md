@@ -105,7 +105,7 @@ Together, these changes mean a downstream caller like the downstream project's `
 **Goal:** The server resolves to the site configured via `ATLASSIAN_OAUTH_CLOUD_ID` regardless of list order
 
 **Steps:**
-1. `_get_cloud_id()` in `utils/oauth.py` calls the accessible-resources endpoint and receives, e.g., `[{"id": "partner-site-id", ...}, {"id": "8b7be5e1-e593-4e28-b67d-2a22bd5a2e6a", ...}]`, where the second entry matches the deployment's configured `ATLASSIAN_OAUTH_CLOUD_ID`
+1. `_get_cloud_id()` in `utils/oauth.py` calls the accessible-resources endpoint and receives, e.g., `[{"id": "partner-site-id", ...}, {"id": "required-site-id", ...}]`, where the second entry matches the deployment's configured `ATLASSIAN_OAUTH_CLOUD_ID`
 2. Current (buggy) behavior: line 328 unconditionally sets `self.cloud_id = resources[0]["id"]`, selecting the partner site
 3. Fixed behavior: when a configured cloud ID is available, `_get_cloud_id()` searches `resources` for an entry whose `id` matches it and uses that instead of defaulting to index 0
 4. When no configured cloud ID is available (single-instance deployments), behavior is unchanged — falls back to `resources[0]["id"]`

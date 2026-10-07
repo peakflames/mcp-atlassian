@@ -16,10 +16,10 @@ Scenario: [TOR-02-s6Jze5H] The _get_cloud_id() method shall resolve to the acces
     #      cloud ID. The fix must search `resources` for an entry matching the configured
     #      id before falling back to index 0.
     #
-    Given an OAuth token whose accessible-resources response is [{"id": "partner-site-id"}, {"id": "8b7be5e1-e593-4e28-b67d-2a22bd5a2e6a"}]
-    And ATLASSIAN_OAUTH_CLOUD_ID is configured as "8b7be5e1-e593-4e28-b67d-2a22bd5a2e6a"
+    Given an OAuth token whose accessible-resources response is [{"id": "partner-site-id"}, {"id": "required-site-id"}]
+    And ATLASSIAN_OAUTH_CLOUD_ID is configured as "required-site-id"
     When _get_cloud_id() resolves the cloud ID for that token
-    Then self.cloud_id equals "8b7be5e1-e593-4e28-b67d-2a22bd5a2e6a"
+    Then self.cloud_id equals "required-site-id"
     And self.cloud_id does not equal "partner-site-id"
 
 Scenario: [TOR-02-IUNtYgO] The _get_cloud_id() method shall fall back to the first accessible resource when no ATLASSIAN_OAUTH_CLOUD_ID is configured, preserving existing single-instance behavior
@@ -45,11 +45,11 @@ Scenario: [TOR-02-CE3OroW] The OAuth flow shall reject, immediately after authen
     #      and caching — this is new behavior, not a fix to an existing check.
     #
     Given a completed OAuth authentication flow whose resulting token's accessible-resources response is [{"id": "partner-site-id", "name": "Partner Co"}]
-    And ATLASSIAN_OAUTH_CLOUD_ID is configured as "8b7be5e1-e593-4e28-b67d-2a22bd5a2e6a"
+    And ATLASSIAN_OAUTH_CLOUD_ID is configured as "required-site-id"
     When the server performs post-auth validation of that token
     Then the server rejects the token
     And the resulting error names "Partner Co" (or "partner-site-id") as the token's actual site
-    And the resulting error names "8b7be5e1-e593-4e28-b67d-2a22bd5a2e6a" as the required site
+    And the resulting error names "required-site-id" as the required site
 
 Scenario: [TOR-02-MLk6Fcn] The OAuth flow shall accept and proceed to cache a token whose accessible resources include the configured cloud site
     Given a completed OAuth authentication flow whose resulting token's accessible-resources response includes an entry matching the configured ATLASSIAN_OAUTH_CLOUD_ID

@@ -1225,7 +1225,7 @@ class TestDataCenterOAuth:
 class TestMultiInstanceOAuthCloudIdResolution:
     """Regression tests for Epic-1SVldWi: multi-instance OAuth cloud-site resolution."""
 
-    REQUIRED_ID = "8b7be5e1-e593-4e28-b67d-2a22bd5a2e6a"
+    REQUIRED_ID = "required-site-id"
     PARTNER_ID = "partner-site-id"
 
     def _make_cloud_config(self, cloud_id: str | None = None) -> OAuthConfig:
