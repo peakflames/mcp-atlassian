@@ -1,9 +1,11 @@
 """Per-space access control on page, label, attachment, and comment tools.
 
-Each test builds a real ConfluenceFetcher and, where a tool exists, calls the
-MCP tool through a FastMCP client. Only ``requests.Session.request`` is
-replaced, by a fake Confluence that answers both the v1 REST API (basic auth,
-Server/Data Center or Cloud) and the v2 API behind the Cloud OAuth gateway.
+HTTP is faked only at ``requests.Session.request``. The fetcher is a real
+ConfluenceFetcher built from a real ConfluenceConfig; the server's
+``get_confluence_fetcher`` is patched to return it. Where a tool exists, it
+is called through a FastMCP client. The fake answers both the v1 REST API
+(basic auth, Server/Data Center or Cloud) and the v2 API behind the Cloud
+OAuth gateway, where v1 content endpoints return 410.
 
 Pages:
     100 lives in LEGAL (blocked), 200 lives in ENG (allowed), and the space
@@ -17,7 +19,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import requests
@@ -28,13 +30,20 @@ from fastmcp.exceptions import ToolError
 from mcp_atlassian.confluence import ConfluenceFetcher
 from mcp_atlassian.confluence.config import ConfluenceConfig
 from mcp_atlassian.servers.confluence import (
+    add_comment,
+    add_label,
+    delete_page,
     download_attachment,
     download_content_attachments,
     get_attachments,
+    get_comments,
     get_labels,
     get_page,
     get_page_images,
+    get_space_page_tree,
+    move_page,
     reply_to_comment,
+    update_page,
 )
 from mcp_atlassian.servers.context import MainAppContext
 from mcp_atlassian.utils.access_control import ProjectAccessError
@@ -52,6 +61,10 @@ PAGES: dict[str, tuple[str, str | None]] = {
 }
 # comment id -> page id
 COMMENTS = {f"1{page_id}": page_id for page_id in PAGES}
+# space key the title search is asked for -> page returned. ENGX stands in
+# for a key the server maps to a page that actually lives in LEGAL.
+TITLE_SEARCH = {"LEGAL": "100", "ENG": "200", "ENGX": "100"}
+SPACE_PAGES = {"LEGAL": "100", "ENG": "200"}
 SECRET_BODY = "<p>secret body</p>"
 SECRET_LABEL = "secret-label"
 IMAGE_BYTES = b"\x89PNG\r\n\x1a\n"
@@ -96,6 +109,23 @@ def _attachment_v1(page_id: str) -> dict[str, Any]:
     return attachment
 
 
+def _page_v1(page_id: str) -> dict[str, Any]:
+    space_key = PAGES[page_id][1]
+    page: dict[str, Any] = {
+        "id": page_id,
+        "type": "page",
+        "status": "current",
+        "title": f"Page {page_id}",
+        "version": {"number": 1},
+        "body": {"storage": {"value": SECRET_BODY}},
+        "children": {"attachment": {"results": []}},
+        "_links": {"webui": f"/pages/{page_id}"},
+    }
+    if space_key:
+        page["space"] = {"key": space_key, "name": space_key}
+    return page
+
+
 class FakeConfluence:
     """Answers the v1 and v2 endpoints used by the tools under test."""
 
@@ -106,8 +136,10 @@ class FakeConfluence:
     def __call__(self, *args: Any, **kwargs: Any) -> requests.Response:
         method = kwargs.get("method") or args[0]
         url = kwargs.get("url") or args[1]
-        path = urlsplit(url).path
-        if path.startswith(GATEWAY_PREFIX):
+        split = urlsplit(url)
+        path = split.path
+        via_gateway = path.startswith(GATEWAY_PREFIX)
+        if via_gateway:
             path = path[len(GATEWAY_PREFIX) :]
         self.paths.append(path)
         if method != "GET":
@@ -124,12 +156,15 @@ class FakeConfluence:
                     "version": {"number": 1},
                 },
             )
-        return self._route(path)
+        if via_gateway and path.startswith("/rest/api/"):
+            # The Cloud OAuth gateway no longer serves v1 content reads.
+            return _response(410, {"message": "Gone"})
+        return self._route(path, parse_qs(split.query))
 
     def data_paths(self) -> list[str]:
         return [p for p in self.paths if DATA_PATH.search(p)]
 
-    def _route(self, path: str) -> requests.Response:
+    def _route(self, path: str, query: dict[str, list[str]]) -> requests.Response:
         if path.endswith("/secret.png") and "/download/attachments/" in path:
             return _response(200, content=IMAGE_BYTES)
 
@@ -195,20 +230,41 @@ class FakeConfluence:
                 comment["space"] = {"key": space_key}
             return _response(200, comment)
         if m := re.fullmatch(r"/rest/api/content/(\d+)", path):
-            space_key = PAGES[m[1]][1]
-            page: dict[str, Any] = {
-                "id": m[1],
-                "type": "page",
-                "status": "current",
-                "title": f"Page {m[1]}",
-                "version": {"number": 1},
-                "body": {"storage": {"value": SECRET_BODY}},
-                "children": {"attachment": {"results": []}},
-                "_links": {"webui": f"/pages/{m[1]}"},
-            }
-            if space_key:
-                page["space"] = {"key": space_key, "name": space_key}
-            return _response(200, page)
+            return _response(200, _page_v1(m[1]))
+        if path == "/rest/api/content":
+            space = query.get("spaceKey", [""])[0].strip().upper()
+            if "title" in query:
+                page_id = TITLE_SEARCH.get(space)
+                results = [_page_v1(page_id)] if page_id else []
+                return _response(200, {"results": results})
+            page_id = SPACE_PAGES.get(space)
+            tree = (
+                [
+                    {
+                        "id": page_id,
+                        "title": f"Page {page_id}",
+                        "ancestors": [],
+                        "extensions": {"position": 0},
+                    }
+                ]
+                if page_id
+                else []
+            )
+            return _response(200, {"results": tree, "_links": {}})
+        if m := re.fullmatch(r"/rest/api/content/(\d+)/child/comment", path):
+            return _response(
+                200,
+                {
+                    "results": [
+                        {
+                            "id": f"1{m[1]}",
+                            "type": "comment",
+                            "body": {"view": {"value": "<p>secret comment</p>"}},
+                            "version": {"number": 1},
+                        }
+                    ]
+                },
+            )
         if m := re.fullmatch(r"/rest/api/content/att(\d+)", path):
             return _response(200, _attachment_v1(m[1]))
         if m := re.fullmatch(r"/rest/api/content/(\d+)/label", path):
@@ -303,15 +359,22 @@ async def connect(http: None) -> AsyncIterator[Callable[..., Awaitable[Client]]]
                 download_attachment,
                 download_content_attachments,
                 get_page_images,
+                get_comments,
+                get_space_page_tree,
                 reply_to_comment,
+                add_comment,
+                add_label,
+                update_page,
+                delete_page,
+                move_page,
             ):
                 mcp.add_tool(tool)
-            stack.enter_context(
-                patch(
-                    "mcp_atlassian.servers.confluence.get_confluence_fetcher",
-                    AsyncMock(return_value=fetcher),
-                )
-            )
+            # Tools and check_write_access look the fetcher up separately.
+            for target in (
+                "mcp_atlassian.servers.confluence.get_confluence_fetcher",
+                "mcp_atlassian.servers.dependencies.get_confluence_fetcher",
+            ):
+                stack.enter_context(patch(target, AsyncMock(return_value=fetcher)))
             client = Client(transport=FastMCPTransport(mcp))
             return await stack.enter_async_context(client)
 
@@ -404,6 +467,96 @@ async def test_get_page_by_title_in_blocked_space_denied(
     with pytest.raises(ToolError, match="'legal' is blocked"):
         await client.call_tool("get_page", {"title": "Any", "space_key": "legal"})
     assert fake.paths == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("space_key", ["  legal ", "LeGaL\t", " LEGAL"])
+async def test_get_page_by_title_padded_or_case_variant_key_denied(
+    connect: Any, fake: FakeConfluence, mode: str, space_key: str
+) -> None:
+    client = await connect(mode)
+    with pytest.raises(ToolError, match="is blocked"):
+        await client.call_tool("get_page", {"title": "Any", "space_key": space_key})
+    assert fake.paths == []
+
+
+@pytest.mark.anyio
+async def test_get_page_by_title_checks_returned_page_space(
+    connect: Any, fake: FakeConfluence
+) -> None:
+    """The page returned for an unlisted key is checked against its own space."""
+    client = await connect(V1)
+    with pytest.raises(ToolError, match="'LEGAL' is blocked"):
+        await client.call_tool("get_page", {"title": "Any", "space_key": "ENGX"})
+
+
+@pytest.mark.anyio
+async def test_get_page_by_title_allowed_space_served(
+    connect: Any, fake: FakeConfluence
+) -> None:
+    client = await connect(V1)
+    page = json.loads(
+        _text(await client.call_tool("get_page", {"title": "Any", "space_key": "ENG"}))
+    )
+    assert "secret body" in page["metadata"]["content"]["value"]
+
+
+# ---------------------------------------------------------------------------
+# get_space_page_tree and get_comments
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("space_key", ["LEGAL", " legal "])
+async def test_space_page_tree_blocked_space_denied(
+    connect: Any, fake: FakeConfluence, mode: str, space_key: str
+) -> None:
+    client = await connect(mode)
+    with pytest.raises(ToolError, match="is blocked"):
+        await client.call_tool("get_space_page_tree", {"space_key": space_key})
+    assert fake.paths == []
+
+
+@pytest.mark.anyio
+async def test_space_page_tree_allowed_space_served(
+    connect: Any, fake: FakeConfluence
+) -> None:
+    client = await connect(V1)
+    tree = json.loads(
+        _text(await client.call_tool("get_space_page_tree", {"space_key": "ENG"}))
+    )
+    assert [page["id"] for page in tree["pages"]] == [ALLOWED_PAGE]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(
+    ("page_id", "message"),
+    [
+        (BLOCKED_PAGE, "'LEGAL' is blocked"),
+        (UNRESOLVABLE_PAGE, "Could not determine the space"),
+    ],
+)
+async def test_get_comments_denied(
+    connect: Any, fake: FakeConfluence, mode: str, page_id: str, message: str
+) -> None:
+    client = await connect(mode)
+    with pytest.raises(ToolError, match=message):
+        await client.call_tool("get_comments", {"page_id": page_id})
+    assert [p for p in fake.paths if "/comment" in p] == []
+
+
+@pytest.mark.anyio
+async def test_get_comments_allowed_space_served(
+    connect: Any, fake: FakeConfluence
+) -> None:
+    client = await connect(V1)
+    comments = json.loads(
+        _text(await client.call_tool("get_comments", {"page_id": ALLOWED_PAGE}))
+    )
+    assert len(comments) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -520,29 +673,107 @@ async def test_no_block_list_makes_no_space_lookups(
 
 
 # ---------------------------------------------------------------------------
-# Write paths on labels and attachments (fetcher level)
+# Writes
 # ---------------------------------------------------------------------------
+
+# (page id, blocked list, read-only list, expected error text)
+DENIED_WRITE_CASES = [
+    pytest.param(BLOCKED_PAGE, "LEGAL", None, "'LEGAL' is blocked", id="blocked"),
+    pytest.param(
+        UNRESOLVABLE_PAGE,
+        "LEGAL",
+        None,
+        "CONFLUENCE_SPACES_BLOCKED is set",
+        id="unresolvable-with-blocklist",
+    ),
+    pytest.param(ALLOWED_PAGE, None, "ENG", "'ENG' is read-only", id="readonly"),
+    pytest.param(
+        UNRESOLVABLE_PAGE,
+        None,
+        "ENG",
+        "CONFLUENCE_SPACES_READONLY is set",
+        id="unresolvable-with-readonly-only",
+    ),
+]
+
+CONTENT_WRITES: dict[str, Callable[[ConfluenceFetcher, str, Path], Any]] = {
+    "add_page_label": lambda f, page_id, _p: f.add_page_label(page_id, "x"),
+    "upload_attachment": lambda f, page_id, p: f.upload_attachment(page_id, str(p)),
+    "upload_attachments": lambda f, page_id, p: f.upload_attachments(page_id, [str(p)]),
+    "delete_attachment": lambda f, page_id, _p: f.delete_attachment(f"att{page_id}"),
+    "reply_to_comment": lambda f, page_id, _p: f.reply_to_comment(f"1{page_id}", "hi"),
+}
 
 
 @pytest.mark.usefixtures("http")
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("page_id", [BLOCKED_PAGE, UNRESOLVABLE_PAGE])
-def test_label_and_attachment_writes_denied(
-    fake: FakeConfluence, mode: str, page_id: str, tmp_path: Path
+@pytest.mark.parametrize("operation", list(CONTENT_WRITES))
+@pytest.mark.parametrize(
+    ("page_id", "blocked", "readonly", "message"), DENIED_WRITE_CASES
+)
+def test_content_level_writes_denied(
+    fake: FakeConfluence,
+    tmp_path: Path,
+    mode: str,
+    operation: str,
+    page_id: str,
+    blocked: str | None,
+    readonly: str | None,
+    message: str,
 ) -> None:
+    """Fetcher-level writes are checked even when called without a tool."""
     upload = tmp_path / "file.txt"
     upload.write_text("x")
-    fetcher = _fetcher(mode, blocked="LEGAL")
+    fetcher = _fetcher(mode, blocked=blocked, readonly=readonly)
 
-    with pytest.raises(ProjectAccessError):
-        fetcher.add_page_label(page_id, "x")
-    with pytest.raises(ProjectAccessError):
-        fetcher.upload_attachment(page_id, str(upload))
-    with pytest.raises(ProjectAccessError):
-        fetcher.delete_attachment(f"att{page_id}")
+    with pytest.raises(ProjectAccessError, match=message):
+        CONTENT_WRITES[operation](fetcher, page_id, upload)
 
     assert fake.writes == []
     assert fake.data_paths() == []
+
+
+PAGE_WRITE_TOOLS: dict[str, Callable[[str], dict[str, Any]]] = {
+    "update_page": lambda page_id: {"page_id": page_id, "title": "t", "content": "c"},
+    "delete_page": lambda page_id: {"page_id": page_id},
+    "move_page": lambda page_id: {"page_id": page_id, "target_parent_id": "200"},
+    "add_comment": lambda page_id: {"page_id": page_id, "body": "hi"},
+    "add_label": lambda page_id: {"page_id": page_id, "name": "x"},
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", list(PAGE_WRITE_TOOLS))
+@pytest.mark.parametrize(
+    ("page_id", "blocked", "readonly", "message"), DENIED_WRITE_CASES
+)
+async def test_page_write_tools_denied(
+    connect: Any,
+    fake: FakeConfluence,
+    mode: str,
+    tool: str,
+    page_id: str,
+    blocked: str | None,
+    readonly: str | None,
+    message: str,
+) -> None:
+    """Write tools that take a page_id are checked by check_write_access."""
+    client = await connect(mode, blocked=blocked, readonly=readonly)
+    with pytest.raises(ToolError, match=message):
+        await client.call_tool(tool, PAGE_WRITE_TOOLS[tool](page_id))
+    assert fake.writes == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", ["delete_page", "add_comment"])
+async def test_page_write_tools_allowed_space(
+    connect: Any, fake: FakeConfluence, mode: str, tool: str
+) -> None:
+    client = await connect(mode, blocked="LEGAL", readonly="LEGACY")
+    await client.call_tool(tool, PAGE_WRITE_TOOLS[tool](ALLOWED_PAGE))
+    assert len(fake.writes) == 1
 
 
 # ---------------------------------------------------------------------------

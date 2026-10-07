@@ -433,7 +433,7 @@ class PagesMixin(ConfluenceClient):
         try:
             # Directly try to find the page by title
             page = self.confluence.get_page_by_title(
-                space=space_key, title=title, expand="body.storage,version"
+                space=space_key, title=title, expand="body.storage,version,space"
             )
 
             if not page:
@@ -442,6 +442,19 @@ class PagesMixin(ConfluenceClient):
                     f"The space may be invalid, the page may not exist, or permissions may be insufficient."
                 )
                 return None
+
+            # Check the space the page was actually returned from.
+            if self.config.spaces_blocked_set:
+                page_space = page.get("space")
+                returned_key = (
+                    page_space.get("key") if isinstance(page_space, dict) else None
+                )
+                check_confluence_content_space_access(
+                    self.config,
+                    str(returned_key) if returned_key else None,
+                    content_id=str(page.get("id", "")),
+                    write=False,
+                )
 
             try:
                 content = page["body"]["storage"]["value"]
@@ -477,6 +490,8 @@ class PagesMixin(ConfluenceClient):
                 page_width=page_width,
             )
 
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
         except KeyError as e:
             logger.error(f"Missing key in page data: {str(e)}")
             return None
@@ -887,8 +902,14 @@ class PagesMixin(ConfluenceClient):
             - Note: parent_id is None for root pages
 
         Raises:
+            ValueError: If the space is listed in CONFLUENCE_SPACES_BLOCKED
             Exception: If there is an error fetching pages
         """
+        try:
+            check_confluence_space_access(self.config, space_key, write=False)
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
+
         try:
             # Paginate using the raw API to access _links.next for reliable
             # truncation detection. The higher-level get_all_pages_from_space()

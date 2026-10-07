@@ -257,8 +257,8 @@ class ConfluenceClient:
         Reads are checked against ``CONFLUENCE_SPACES_BLOCKED``; writes are
         also checked against ``CONFLUENCE_SPACES_READONLY``. Does nothing, and
         makes no request, when no relevant list is configured. If the space
-        cannot be determined, access is denied when a block list is set and
-        allowed otherwise.
+        cannot be determined, access is denied whenever a relevant list is
+        configured.
 
         Args:
             content_id: A page, blog post, attachment, or comment ID

@@ -78,13 +78,14 @@ def check_confluence_space_access(
 
     Args:
         config: The :class:`ConfluenceConfig` holding the access-control sets.
-        space_key: The space key to check (case-insensitive).
+        space_key: The space key to check (case-insensitive; surrounding
+            whitespace is ignored, as in the configured lists).
         write: ``True`` for mutation operations, ``False`` for read operations.
 
     Raises:
         ProjectAccessError: If access is denied.
     """
-    sk = space_key.upper()
+    sk = space_key.strip().upper()
 
     if sk in config.spaces_blocked_set:
         raise ProjectAccessError(
@@ -108,10 +109,11 @@ def check_confluence_content_space_access(
 ) -> None:
     """Check access to content whose space key may not be known.
 
-    Fails closed: when ``config.spaces_blocked_set`` is non-empty and
-    ``space_key`` is ``None`` or empty, access is denied because the content
-    might live in a blocked space. When the space key is known, this behaves
-    like :func:`check_confluence_space_access`. When no block list is
+    Fails closed when ``space_key`` is ``None`` or empty: reads are denied
+    when ``config.spaces_blocked_set`` is non-empty, and writes are denied
+    when either ``config.spaces_blocked_set`` or ``config.spaces_readonly_set``
+    is non-empty. When the space key is known, this behaves like
+    :func:`check_confluence_space_access`. When no relevant list is
     configured and the key is unknown, this is a no-op.
 
     Args:
@@ -124,11 +126,17 @@ def check_confluence_content_space_access(
     Raises:
         ProjectAccessError: If access is denied.
     """
-    if not space_key:
+    if not space_key or not space_key.strip():
         if config.spaces_blocked_set:
             msg = (
                 f"Could not determine the space of content '{content_id}'; "
                 "access is denied because CONFLUENCE_SPACES_BLOCKED is set."
+            )
+            raise ProjectAccessError(msg)
+        if write and config.spaces_readonly_set:
+            msg = (
+                f"Could not determine the space of content '{content_id}'; "
+                "write access is denied because CONFLUENCE_SPACES_READONLY is set."
             )
             raise ProjectAccessError(msg)
         return

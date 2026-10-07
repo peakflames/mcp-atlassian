@@ -368,8 +368,9 @@ def test_confluence_fetcher_attachment_method_calls():
         patch("mcp_atlassian.preprocessing.confluence.ConfluencePreprocessor"),
         patch("mcp_atlassian.confluence.client.configure_ssl_verification"),
     ):
-        # Setup mocks. No space block list is configured.
+        # Setup mocks. No space block or read-only list is configured.
         mock_from_env.return_value.spaces_blocked_set = frozenset()
+        mock_from_env.return_value.spaces_readonly_set = frozenset()
         mock_confluence = mock_confluence_class.return_value
         mock_session = MagicMock()
         mock_response = MagicMock()
