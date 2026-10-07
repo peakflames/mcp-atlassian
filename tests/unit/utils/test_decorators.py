@@ -449,8 +449,8 @@ _GUARD_KWARG_TARGETS: dict[str, tuple[str, set[str]]] = {
 # tool already identifies by issue_key, or a user; no separate project.
 _JIRA_NON_PROJECT_ID_PARAMS = {"comment_id", "form_id", "transition_id", "account_id"}
 
-# Project resolved only via an API lookup; not checked by the guard.
-_JIRA_LOOKUP_ONLY_PARAMS_KNOWN_GAP = {"board_id", "sprint_id", "link_id"}
+# Board, sprint and link IDs; their project is only available via an API lookup.
+_JIRA_LOOKUP_ONLY_ID_PARAMS = {"board_id", "sprint_id", "link_id"}
 
 
 def _all_guarded_tools() -> dict[str, dict[str, set[str]]]:
@@ -505,9 +505,7 @@ def test_jira_write_tool_key_params_are_read_by_guard():
             }
             if key_like and param not in guard_names:
                 unguarded.append(f"{tool_name}.{param}")
-            classified = (
-                _JIRA_NON_PROJECT_ID_PARAMS | _JIRA_LOOKUP_ONLY_PARAMS_KNOWN_GAP
-            )
+            classified = _JIRA_NON_PROJECT_ID_PARAMS | _JIRA_LOOKUP_ONLY_ID_PARAMS
             if param.endswith("_id") and param not in classified:
                 unguarded.append(f"{tool_name}.{param} (unclassified id)")
     assert not unguarded, f"key-bearing parameters not read by the guard: {unguarded}"
@@ -517,7 +515,7 @@ def test_jira_id_param_sets_match_write_tools():
     """Every classified ID parameter still exists on some Jira write tool."""
     all_params = set().union(*_all_guarded_tools()["jira"].values())
     stale = sorted(
-        (_JIRA_NON_PROJECT_ID_PARAMS | _JIRA_LOOKUP_ONLY_PARAMS_KNOWN_GAP) - all_params
+        (_JIRA_NON_PROJECT_ID_PARAMS | _JIRA_LOOKUP_ONLY_ID_PARAMS) - all_params
     )
     assert not stale, f"classified ID parameters no write tool has: {stale}"
 
