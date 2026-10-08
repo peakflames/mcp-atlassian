@@ -13,7 +13,8 @@ The per-request credential tests at the end do not patch
 
 Pages:
     100 lives in LEGAL (blocked), 200 lives in ENG (allowed), and the space
-    of 300 cannot be determined. Comment 1xxx sits on page xxx.
+    of 300 cannot be determined. Comment 1xxx sits on page xxx. Folder 500
+    lives in ENG and folder 600 in LEGAL; 700 is no known content.
 """
 
 import base64
@@ -71,6 +72,11 @@ PAGES: dict[str, tuple[str, str | None]] = {
     "300": ("9003", None),
     "400": ("9004", "OPS"),
 }
+# folder id -> (space id, space key)
+FOLDERS: dict[str, tuple[str, str]] = {
+    "500": ("9002", "ENG"),
+    "600": ("9001", "LEGAL"),
+}
 # comment id -> page id
 COMMENTS = {f"1{page_id}": page_id for page_id in PAGES}
 # space key the title search is asked for -> page returned. ENGX stands in
@@ -88,6 +94,9 @@ MODES = [V1, V2]
 BLOCKED_PAGE = "100"
 ALLOWED_PAGE = "200"
 UNRESOLVABLE_PAGE = "300"
+ALLOWED_FOLDER = "500"
+BLOCKED_FOLDER = "600"
+UNKNOWN_CONTENT = "700"
 
 # Paths that return labels, attachment metadata, or attachment bytes.
 DATA_PATH = re.compile(r"/label|/labels|/child/attachment|/attachments$|/download/")
@@ -203,7 +212,11 @@ class FakeConfluence:
                         return _response(403, {"message": "forbidden"})
                     return _response(200, {"id": space_id, "key": key})
             return _response(404)
-        if m := re.fullmatch(r"/api/v2/pages/(\d+)", path):
+        if (m := re.fullmatch(r"/api/v2/folders/(\d+)", path)) and m[1] in FOLDERS:
+            return _response(
+                200, {"id": m[1], "type": "folder", "spaceId": FOLDERS[m[1]][0]}
+            )
+        if (m := re.fullmatch(r"/api/v2/pages/(\d+)", path)) and m[1] in PAGES:
             space_id, _ = PAGES[m[1]]
             return _response(
                 200,
@@ -256,7 +269,12 @@ class FakeConfluence:
             if space_key := PAGES[COMMENTS[m[1]]][1]:
                 comment["space"] = {"key": space_key}
             return _response(200, comment)
-        if m := re.fullmatch(r"/rest/api/content/(\d+)", path):
+        if (m := re.fullmatch(r"/rest/api/content/(\d+)", path)) and m[1] in FOLDERS:
+            folder_key = FOLDERS[m[1]][1]
+            return _response(
+                200, {"id": m[1], "type": "folder", "space": {"key": folder_key}}
+            )
+        if (m := re.fullmatch(r"/rest/api/content/(\d+)", path)) and m[1] in PAGES:
             return _response(200, _page_v1(m[1]))
         if path == "/rest/api/content":
             space = query.get("spaceKey", [""])[0].strip().upper()
@@ -884,6 +902,84 @@ async def test_page_write_tools_allowed_space(
 ) -> None:
     client = await connect(mode, blocked="LEGAL", readonly="LEGACY")
     await client.call_tool(tool, PAGE_WRITE_TOOLS[tool](ALLOWED_PAGE))
+    assert len(fake.writes) == 1
+
+
+# ---------------------------------------------------------------------------
+# Folders resolve to their own space.
+# ---------------------------------------------------------------------------
+
+V2_CONTENT_TYPES = ("pages", "blogposts", "embeds", "folders")
+
+
+@pytest.mark.usefixtures("http")
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(
+    ("content_id", "space_key"),
+    [(ALLOWED_FOLDER, "ENG"), (BLOCKED_FOLDER, "LEGAL"), (UNKNOWN_CONTENT, None)],
+    ids=["allowed-folder", "blocked-folder", "unknown-content"],
+)
+def test_folder_resolves_to_its_space(
+    fake: FakeConfluence, mode: str, content_id: str, space_key: str | None
+) -> None:
+    fetcher = _fetcher(mode, blocked="LEGAL")
+    assert fetcher.resolve_content_space_key(content_id) == space_key
+    if mode == V2:
+        assert fake.paths[: len(V2_CONTENT_TYPES)] == [
+            f"/api/v2/{content_type}/{content_id}" for content_type in V2_CONTENT_TYPES
+        ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", list(PARENT_TOOLS))
+@pytest.mark.parametrize(
+    ("parent_id", "blocked", "readonly", "message"),
+    [
+        pytest.param(
+            BLOCKED_FOLDER, "LEGAL", None, "'LEGAL' is blocked", id="blocked-folder"
+        ),
+        pytest.param(
+            ALLOWED_FOLDER, None, "ENG", "'ENG' is read-only", id="readonly-folder"
+        ),
+        pytest.param(
+            UNKNOWN_CONTENT,
+            "LEGAL",
+            None,
+            "CONFLUENCE_SPACES_BLOCKED is set",
+            id="unknown-content",
+        ),
+    ],
+)
+async def test_folder_parent_write_denied(
+    connect: Any,
+    fake: FakeConfluence,
+    mode: str,
+    tool: str,
+    parent_id: str,
+    blocked: str | None,
+    readonly: str | None,
+    message: str,
+) -> None:
+    """A folder as the new parent counts as a write into the folder's space."""
+    client = await connect(mode, blocked=blocked, readonly=readonly)
+    with pytest.raises(ToolError, match=message):
+        await client.call_tool(tool, PARENT_TOOLS[tool](parent_id))
+    assert fake.writes == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", list(PARENT_TOOLS))
+async def test_folder_parent_in_allowed_space_proceeds(
+    connect: Any, fake: FakeConfluence, mode: str, tool: str
+) -> None:
+    client = await connect(mode, blocked="LEGAL", readonly="LEGACY")
+    try:
+        await client.call_tool(tool, PARENT_TOOLS[tool](ALLOWED_FOLDER))
+    except ToolError as exc:
+        # The fake's write response is minimal; only the access check matters.
+        assert "CONFLUENCE_SPACES" not in str(exc)
     assert len(fake.writes) == 1
 
 

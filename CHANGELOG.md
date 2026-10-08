@@ -31,7 +31,9 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 - `confluence_create_page`, `confluence_update_page` (with `parent_id`), and
   `confluence_move_page` (with `target_parent_id`) also check the parent's
   space against `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY`,
-  and are denied when it cannot be determined while either list is set.
+  and are denied when it cannot be determined while either list is set. A
+  folder as the parent resolves to the folder's space, including under Cloud
+  OAuth.
 - `confluence_get_page` now fails closed when a block list is set and the
   page's space cannot be determined. When called with `title` and
   `space_key`, it enforces `CONFLUENCE_SPACES_BLOCKED` for both the requested
@@ -60,7 +62,8 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 - With a block list set, a request is denied when the content's space cannot
   be determined. The error names `CONFLUENCE_SPACES_BLOCKED`.
 - Under Cloud OAuth, the space check needs the `read:space:confluence` scope
-  plus read access to the content (page, blog post, attachment, or comment).
+  plus read access to the content (page, blog post, folder, attachment, or
+  comment).
   Without them, checked requests are denied while a relevant list is set.
 - Embed IDs passed to the label and attachment tools now return the
   access-control error instead of a 404 when their space is blocked or cannot

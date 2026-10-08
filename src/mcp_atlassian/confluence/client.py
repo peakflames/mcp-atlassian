@@ -222,7 +222,7 @@ class ConfluenceClient:
     def resolve_content_space_key(
         self, content_id: str, *, is_comment: bool = False
     ) -> str | None:
-        """Resolve the space key of a page, blog post, attachment, or comment.
+        """Resolve the space key of a page, blog post, folder, attachment, or comment.
 
         Used only by access-control checks. Returns None when the key cannot
         be determined.

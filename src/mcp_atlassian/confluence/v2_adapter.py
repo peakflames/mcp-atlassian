@@ -1273,12 +1273,12 @@ class ConfluenceV2Adapter:
         return response.status_code, data if isinstance(data, dict) else None
 
     def _get_content_space_id(self, content_id: str) -> str | None:
-        """Find the space ID of a page, blog post, embed, or attachment.
+        """Find the space ID of a page, blog post, embed, folder, or attachment.
 
         Attachments (``att`` prefix) carry no space ID in v2, so their
         container (page, blog post, or custom content) is looked up instead.
-        Other IDs are tried as a page, then a blog post, then an embed,
-        moving on only when the previous endpoint returns 404.
+        Other IDs are tried as a page, then a blog post, an embed, and a
+        folder, moving on only when the previous endpoint returns 404.
 
         Returns:
             The space ID, or None if it cannot be determined.
@@ -1289,7 +1289,7 @@ class ConfluenceV2Adapter:
             )
             return self._container_space_id(attachment) if attachment else None
 
-        for content_type in ("pages", "blogposts", "embeds"):
+        for content_type in ("pages", "blogposts", "embeds", "folders"):
             status, data = self._get_json_or_none(
                 f"{self.base_url}/api/v2/{content_type}/{content_id}"
             )
@@ -1353,7 +1353,7 @@ class ConfluenceV2Adapter:
         Any lookup failure returns None so callers can fail closed.
 
         Args:
-            content_id: A page, blog post, embed, or attachment ID
+            content_id: A page, blog post, embed, folder, or attachment ID
 
         Returns:
             The space key, or None if it cannot be determined
