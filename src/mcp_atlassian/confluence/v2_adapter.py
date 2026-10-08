@@ -1254,8 +1254,10 @@ class ConfluenceV2Adapter:
 
         Lists ``/api/v2/pages/{id}/direct-children`` and keeps only ``page``
         and, when requested, ``folder`` items, in the order the API returns
-        them. The v2 list is cursor-paginated, so ``start`` is applied by
-        skipping that many matching items while following ``_links.next``.
+        them. If the pages endpoint returns 404, the ID is retried as a
+        folder via ``/api/v2/folders/{id}/direct-children``. The v2 list is
+        cursor-paginated, so ``start`` is applied by skipping that many
+        matching items while following ``_links.next``.
 
         The children endpoint returns only ``id``, ``status``, ``title``,
         ``type``, ``spaceId`` and ``childPosition``. When ``include_version``
@@ -1267,7 +1269,7 @@ class ConfluenceV2Adapter:
         warning); it does not fail the listing.
 
         Args:
-            page_id: The ID of the parent page
+            page_id: The ID of the parent page or folder
             start: Number of matching child items to skip
             limit: Maximum number of child items to return
             include_folders: Whether to include child folders
@@ -1282,55 +1284,26 @@ class ConfluenceV2Adapter:
             HTTPError: If the API request fails with 401/403
             ChildListTruncatedError: If ``max_pages`` requests did not reach
                 the end of the list or ``start + limit`` matching items
-            ValueError: If the parent is not found or other errors. The
-                message never contains the request URL.
+            ValueError: If the parent is not found as a page or a folder,
+                or other errors. The message never contains the request URL.
         """
         if limit <= 0:
             return []
         wanted_types = {"page", "folder"} if include_folders else {"page"}
-        url = f"{self.base_url}/api/v2/pages/{page_id}/direct-children"
         try:
-            children: list[dict[str, Any]] = []
-            skipped = 0
-            scanned = 0
-            # Always request the v2 maximum so that skipping ``start`` items
-            # and filtering out other content types cannot exhaust
-            # ``max_pages`` early.
-            params: dict[str, Any] = {"limit": V2_MAX_PAGE_SIZE}
-            for _ in range(max_pages):
-                response = self.session.get(url, params=params)
-                response.raise_for_status()
-                data = response.json()
-                for item in data.get("results", []):
-                    scanned += 1
-                    if item.get("type") not in wanted_types:
-                        continue
-                    if skipped < start:
-                        skipped += 1
-                        continue
-                    children.append(item)
-                    if len(children) >= limit:
-                        break
-                if len(children) >= limit:
-                    break
-
-                next_link = data.get("_links", {}).get("next")
-                query = urllib.parse.parse_qs(
-                    urllib.parse.urlsplit(next_link or "").query
+            try:
+                children = self._list_direct_children(
+                    "pages", page_id, wanted_types, start, limit, max_pages
                 )
-                cursor = query.get("cursor", [None])[0]
-                if not cursor:
-                    break
-                params = {"limit": V2_MAX_PAGE_SIZE, "cursor": cursor}
-            else:
-                # Returning what was collected would look like a complete
-                # (possibly empty) list of children.
-                msg = (
-                    f"Could not list children of page '{page_id}': stopped after "
-                    f"{max_pages} requests ({scanned} child items scanned) before "
-                    f"finding {start + limit} matching items"
+            except HTTPError as e:
+                if e.response is None or e.response.status_code != 404:
+                    raise
+                # A folder ID is not found on the pages endpoint; folders
+                # have their own direct-children endpoint with the same
+                # response shape.
+                children = self._list_direct_children(
+                    "folders", page_id, wanted_types, start, limit, max_pages
                 )
-                raise ChildListTruncatedError(msg)
 
             details: dict[str, dict[str, Any]] = {}
             page_ids = [str(c["id"]) for c in children if c.get("type") == "page"]
@@ -1390,6 +1363,72 @@ class ConfluenceV2Adapter:
             logger.error(f"Error getting children of page '{page_id}': {e}")
             msg = f"Failed to get children of page '{page_id}': {type(e).__name__}"
             raise ValueError(msg) from e
+
+    def _list_direct_children(
+        self,
+        parent_type: str,
+        parent_id: str,
+        wanted_types: set[str],
+        start: int,
+        limit: int,
+        max_pages: int,
+    ) -> list[dict[str, Any]]:
+        """Collect matching items from ``/api/v2/{parent_type}/{id}/direct-children``.
+
+        Args:
+            parent_type: ``pages`` or ``folders``
+            parent_id: The ID of the parent page or folder
+            wanted_types: Child ``type`` values to keep
+            start: Number of matching child items to skip
+            limit: Maximum number of child items to return
+            max_pages: Safety cap on the number of list pages fetched
+
+        Returns:
+            Matching child items in the order the API returns them
+
+        Raises:
+            HTTPError: If a request fails
+            ChildListTruncatedError: If ``max_pages`` requests did not reach
+                the end of the list or ``start + limit`` matching items
+        """
+        url = f"{self.base_url}/api/v2/{parent_type}/{parent_id}/direct-children"
+        children: list[dict[str, Any]] = []
+        skipped = 0
+        scanned = 0
+        # Always request the v2 maximum so that skipping ``start`` items
+        # and filtering out other content types cannot exhaust
+        # ``max_pages`` early.
+        params: dict[str, Any] = {"limit": V2_MAX_PAGE_SIZE}
+        for _ in range(max_pages):
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            for item in data.get("results", []):
+                scanned += 1
+                if item.get("type") not in wanted_types:
+                    continue
+                if skipped < start:
+                    skipped += 1
+                    continue
+                children.append(item)
+                if len(children) >= limit:
+                    return children
+
+            next_link = data.get("_links", {}).get("next")
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(next_link or "").query)
+            cursor = query.get("cursor", [None])[0]
+            if not cursor:
+                return children
+            params = {"limit": V2_MAX_PAGE_SIZE, "cursor": cursor}
+
+        # Returning what was collected would look like a complete
+        # (possibly empty) list of children.
+        msg = (
+            f"Could not list children of page '{parent_id}': stopped after "
+            f"{max_pages} requests ({scanned} child items scanned) before "
+            f"finding {start + limit} matching items"
+        )
+        raise ChildListTruncatedError(msg)
 
     def _get_pages_by_id(
         self, page_ids: list[str], *, include_body: bool

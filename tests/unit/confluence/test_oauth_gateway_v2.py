@@ -439,6 +439,7 @@ class TestEmbedInfo:
 
 
 CHILDREN_URL = f"{GATEWAY_URL}/api/v2/pages/123/direct-children"
+FOLDER_CHILDREN_URL = f"{GATEWAY_URL}/api/v2/folders/123/direct-children"
 CHILDREN_PAGE_1 = {
     "results": [
         {
@@ -700,16 +701,75 @@ class TestPageChildrenV2:
         assert f"{GATEWAY_URL}/api/v2/pages" not in urls
         assert all(c.version is None for c in children)
 
+    def test_folder_parent_lists_children_across_cursor_pages(self) -> None:
+        mixin = _mixin(PagesMixin)
+        session = mixin.confluence._session
+        routes = _v2_routes()
+        del routes[f"{CHILDREN_URL}#cursor=abc"]
+        routes[CHILDREN_URL] = _url_error_response(404, CHILDREN_URL)
+        routes[FOLDER_CHILDREN_URL] = {
+            **CHILDREN_PAGE_1,
+            "_links": {
+                "next": "/wiki/api/v2/folders/123/direct-children?limit=250&cursor=abc"
+            },
+        }
+        routes[f"{FOLDER_CHILDREN_URL}#cursor=abc"] = CHILDREN_PAGE_2
+        session.get.side_effect = _route(routes)
+
+        children = mixin.get_page_children("123", limit=10, expand="version")
+
+        assert [c.id for c in children] == ["201", "203", "204"]
+        assert [c.type for c in children] == ["page", "folder", "page"]
+        assert children[0].version is not None
+        assert children[0].version.number == 3
+        assert children[0].space is not None
+        assert children[0].space.key == "ENG"
+        calls = session.get.call_args_list
+        assert [call.args[0] for call in calls[:3]] == [
+            CHILDREN_URL,
+            FOLDER_CHILDREN_URL,
+            FOLDER_CHILDREN_URL,
+        ]
+        assert calls[2].kwargs["params"] == {"limit": 250, "cursor": "abc"}
+
+    def test_page_parent_makes_no_folder_request(self) -> None:
+        mixin = _mixin(PagesMixin)
+        session = mixin.confluence._session
+        session.get.side_effect = _route(_v2_routes())
+
+        mixin.get_page_children("123")
+
+        urls = [call.args[0] for call in session.get.call_args_list]
+        assert FOLDER_CHILDREN_URL not in urls
+
+    def test_non_404_error_is_not_retried_as_folder(self) -> None:
+        mixin = _mixin(PagesMixin)
+        session = mixin.confluence._session
+        session.get.side_effect = _route(
+            {CHILDREN_URL: _url_error_response(500, CHILDREN_URL)}
+        )
+
+        with pytest.raises(ValueError, match="HTTP 500"):
+            mixin.get_page_children("123")
+
+        assert session.get.call_count == 1
+
     def test_not_found_raises_clean_message(self) -> None:
         mixin = _mixin(PagesMixin)
-        mixin.confluence._session.get.side_effect = _route(
-            {CHILDREN_URL: _url_error_response(404, CHILDREN_URL)}
+        session = mixin.confluence._session
+        session.get.side_effect = _route(
+            {
+                CHILDREN_URL: _url_error_response(404, CHILDREN_URL),
+                FOLDER_CHILDREN_URL: _url_error_response(404, FOLDER_CHILDREN_URL),
+            }
         )
 
         with pytest.raises(ValueError) as excinfo:
             mixin.get_page_children("123")
 
         assert str(excinfo.value) == "Page not found or not accessible: 123"
+        urls = [call.args[0] for call in session.get.call_args_list]
+        assert urls == [CHILDREN_URL, FOLDER_CHILDREN_URL]
 
     def test_http_error_message_omits_gateway_url(self) -> None:
         mixin = _mixin(PagesMixin)

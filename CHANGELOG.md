@@ -13,7 +13,8 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
   the v2 `/api/v2/pages/{id}/direct-children` endpoint (keeping `page` and,
   with `include_folders`, `folder` items) instead of the v1
   `/rest/api/content/{id}/child/{type}` endpoints, which the gateway is
-  removing (upstream issue #1598). The list is read 250 items per request,
+  removing (upstream issue #1598). A folder ID given as the parent is listed
+  via `/api/v2/folders/{id}/direct-children`. The list is read 250 items per request,
   up to 20 requests; if that is not enough to reach `start + limit` matching
   items, the tool returns an error instead of a partial list. When `expand`
   includes `version` or `body`, child pages are looked up via
