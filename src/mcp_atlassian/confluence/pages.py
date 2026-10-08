@@ -815,6 +815,10 @@ class PagesMixin(ConfluenceClient):
                 incomplete
             Exception: If the child pages cannot be retrieved
         """
+        # Raises ProjectAccessError if the parent's space is blocked, or cannot
+        # be determined while CONFLUENCE_SPACES_BLOCKED is set.
+        self.check_content_access(page_id)
+
         try:
             v2_adapter = self._v2_adapter
             if v2_adapter:
@@ -1117,10 +1121,14 @@ class PagesMixin(ConfluenceClient):
             ConfluencePage model containing the page history
 
         Raises:
+            ProjectAccessError: If the page's space is blocked, or cannot be
+                determined while CONFLUENCE_SPACES_BLOCKED is set
             MCPAtlassianAuthenticationError: If authentication
                 fails with the Confluence API (401/403)
             Exception: If there is an error getting page history
         """
+        self.check_content_access(page_id)
+
         try:
             v2_adapter = self._v2_adapter
             if v2_adapter:
@@ -1281,6 +1289,9 @@ class PagesMixin(ConfluenceClient):
             and diff string.
 
         Raises:
+            ProjectAccessError: If the page's space is blocked, or cannot be
+                determined while CONFLUENCE_SPACES_BLOCKED is set (checked by
+                get_page_history before each version is read).
             MCPAtlassianAuthenticationError: If authentication fails.
         """
         from_page = self.get_page_history(page_id=page_id, version=from_version)

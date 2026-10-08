@@ -47,7 +47,11 @@ from mcp_atlassian.servers.confluence import (
     get_comments,
     get_labels,
     get_page,
+    get_page_children,
+    get_page_diff,
+    get_page_history,
     get_page_images,
+    get_page_views,
     get_space_page_tree,
     move_page,
     reply_to_comment,
@@ -88,6 +92,8 @@ TITLE_SEARCH = {"LEGAL": "100", "ENG": "200", "ENGX": "100", "ENGY": "300"}
 SPACE_PAGES = {"LEGAL": "100", "ENG": "200"}
 SECRET_BODY = "<p>secret body</p>"
 SECRET_LABEL = "secret-label"
+SECRET_CHILD = "Secret child page"
+VIEW_COUNT = 42
 IMAGE_BYTES = b"\x89PNG\r\n\x1a\n"
 
 V1 = "v1"
@@ -155,6 +161,7 @@ class FakeConfluence:
 
     def __init__(self) -> None:
         self.paths: list[str] = []
+        self.requests: list[tuple[str, dict[str, list[str]]]] = []
         self.writes: list[str] = []
 
     def __call__(self, *args: Any, **kwargs: Any) -> requests.Response:
@@ -165,7 +172,14 @@ class FakeConfluence:
         via_gateway = path.startswith(GATEWAY_PREFIX)
         if via_gateway:
             path = path[len(GATEWAY_PREFIX) :]
+        elif path.startswith("/wiki/"):
+            # Cloud site URLs serve the REST API under /wiki.
+            path = path[len("/wiki") :]
         self.paths.append(path)
+        query = parse_qs(split.query)
+        for key, value in (kwargs.get("params") or {}).items():
+            query[key] = [str(value)]
+        self.requests.append((path, query))
         if method != "GET":
             # Accept any write so that a missing check shows up as a success.
             self.writes.append(f"{method} {path}")
@@ -183,12 +197,14 @@ class FakeConfluence:
         if path == "/rest/api/user/current":
             # Credential check made when a per-request fetcher is created.
             return _response(200, {"displayName": "Test User"})
-        if via_gateway and path.startswith("/rest/api/"):
-            # The Cloud OAuth gateway no longer serves v1 content reads.
+        if (
+            via_gateway
+            and path.startswith("/rest/api/")
+            and not path.startswith("/rest/api/analytics/")
+        ):
+            # The Cloud OAuth gateway no longer serves v1 content reads. View
+            # statistics have no v2 endpoint and are read from v1 in all modes.
             return _response(410, {"message": "Gone"})
-        query = parse_qs(split.query)
-        for key, value in (kwargs.get("params") or {}).items():
-            query[key] = [str(value)]
         return self._route(path, query)
 
     def data_paths(self) -> list[str]:
@@ -253,6 +269,33 @@ class FakeConfluence:
                     ]
                 },
             )
+        if m := re.fullmatch(r"/api/v2/pages/(\d+)/versions", path):
+            versions = [{"id": f"{m[1]}v{n}", "number": n} for n in (1, 2)]
+            return _response(200, {"results": versions})
+        if m := re.fullmatch(r"/api/v2/versions/(\d+)v(\d+)", path):
+            return _response(
+                200,
+                {
+                    "id": m[1],
+                    "number": int(m[2]),
+                    "status": "current",
+                    "title": f"Page {m[1]}",
+                    "spaceId": PAGES[m[1]][0],
+                    "body": {"storage": {"value": SECRET_BODY}},
+                },
+            )
+        if m := re.fullmatch(r"/api/v2/pages/(\d+)/direct-children", path):
+            # Used when page children are listed through the v2 API.
+            child = {
+                "id": f"5{m[1]}",
+                "type": "page",
+                "status": "current",
+                "title": SECRET_CHILD,
+                "spaceId": PAGES[m[1]][0],
+            }
+            return _response(200, {"results": [child], "_links": {}})
+        if path == "/api/v2/pages":
+            return _response(200, {"results": []})
         if m := re.fullmatch(r"/api/v2/footer-comments/(\d+)", path):
             return _response(200, {"id": m[1], "pageId": COMMENTS[m[1]]})
         if m := re.fullmatch(r"/api/v2/attachments/att(\d+)", path):
@@ -329,16 +372,28 @@ class FakeConfluence:
             )
         if m := re.fullmatch(r"/rest/api/content/(\d+)/child/attachment", path):
             return _response(200, {"results": [_attachment_v1(m[1])], "size": 1})
+        if m := re.fullmatch(r"/rest/api/content/(\d+)/child/(page|folder)", path):
+            children = []
+            if m[2] == "page":
+                children = [{**_page_v1(m[1]), "id": f"5{m[1]}", "title": SECRET_CHILD}]
+            return _response(200, {"results": children, "size": len(children)})
+        if re.fullmatch(r"/rest/api/analytics/content/(\d+)/views", path):
+            return _response(200, {"count": VIEW_COUNT})
 
         return _response(404, {"message": f"no route for {path}"})
 
 
 def _config(
-    mode: str, *, blocked: str | None, readonly: str | None = None
+    mode: str,
+    *,
+    blocked: str | None,
+    readonly: str | None = None,
+    url: str = SERVER_URL,
 ) -> ConfluenceConfig:
+    """``url`` applies to v1 only; the OAuth config is always Cloud."""
     if mode == V1:
         return ConfluenceConfig(
-            url=SERVER_URL,
+            url=url,
             auth_type="basic",
             username="test-user",
             api_token="test-token",
@@ -355,10 +410,14 @@ def _config(
 
 
 def _fetcher(
-    mode: str, *, blocked: str | None, readonly: str | None = None
+    mode: str,
+    *,
+    blocked: str | None,
+    readonly: str | None = None,
+    url: str = SERVER_URL,
 ) -> ConfluenceFetcher:
     fetcher = ConfluenceFetcher(
-        config=_config(mode, blocked=blocked, readonly=readonly)
+        config=_config(mode, blocked=blocked, readonly=readonly, url=url)
     )
     assert (fetcher._v2_adapter is not None) is (mode == V2)
     return fetcher
@@ -406,6 +465,10 @@ def _server(server_config: ConfluenceConfig | None) -> FastMCP:
         get_page_images,
         get_comments,
         get_space_page_tree,
+        get_page_children,
+        get_page_history,
+        get_page_diff,
+        get_page_views,
         reply_to_comment,
         add_comment,
         add_label,
@@ -423,7 +486,7 @@ async def connect(http: None) -> AsyncIterator[Callable[..., Awaitable[Client]]]
     """Yield ``connect(mode, blocked=..., readonly=...)`` -> connected client.
 
     ``server_config`` replaces the server's global config; by default it is
-    the fetcher's own config.
+    the fetcher's own config. ``url`` is the v1 site URL.
     """
     async with AsyncExitStack() as stack:
 
@@ -433,8 +496,9 @@ async def connect(http: None) -> AsyncIterator[Callable[..., Awaitable[Client]]]
             readonly: str | None = None,
             *,
             server_config: ConfluenceConfig | None = None,
+            url: str = SERVER_URL,
         ) -> Client:
-            fetcher = _fetcher(mode, blocked=blocked, readonly=readonly)
+            fetcher = _fetcher(mode, blocked=blocked, readonly=readonly, url=url)
             mcp = _server(server_config or fetcher.config)
             # Tools and check_write_access look the fetcher up separately.
             for target in (
@@ -747,6 +811,187 @@ async def test_no_block_list_makes_no_space_lookups(
         if mode == V1
         else f"/api/v2/pages/{UNRESOLVABLE_PAGE}/attachments",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Page children, page history, version diffs and view statistics
+# ---------------------------------------------------------------------------
+
+# Page view statistics are Cloud-only, so v1 runs against a Cloud site URL.
+CLOUD_SITE_URL = "https://test.atlassian.net"
+
+PAGE_READ_TOOLS: dict[str, Callable[[str], dict[str, Any]]] = {
+    "get_page_children": lambda page_id: {"parent_id": page_id},
+    "get_page_history": lambda page_id: {"page_id": page_id, "version": 1},
+    "get_page_diff": lambda page_id: {
+        "page_id": page_id,
+        "from_version": 1,
+        "to_version": 2,
+    },
+    "get_page_views": lambda page_id: {"page_id": page_id},
+}
+
+
+def _site_url(tool: str) -> str:
+    return CLOUD_SITE_URL if tool == "get_page_views" else SERVER_URL
+
+
+def _is_content_lookup(path: str, query: dict[str, list[str]]) -> bool:
+    """Whether a request is the access check reading a content item's space."""
+    if re.fullmatch(r"/api/v2/(pages|blogposts|embeds|folders)/\d+", path):
+        return True
+    return bool(re.fullmatch(r"/rest/api/content/\d+", path)) and query.get(
+        "expand"
+    ) == ["space"]
+
+
+def _non_lookup_requests(fake: FakeConfluence) -> list[str]:
+    """Requests other than the ones the access check makes to find a space."""
+    return [
+        path
+        for path, query in fake.requests
+        if not (path.startswith("/api/v2/spaces") or _is_content_lookup(path, query))
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", list(PAGE_READ_TOOLS))
+@pytest.mark.parametrize(
+    ("page_id", "message"),
+    [
+        (BLOCKED_PAGE, "'LEGAL' is blocked"),
+        (UNRESOLVABLE_PAGE, "Could not determine the space"),
+    ],
+    ids=["blocked", "unresolvable"],
+)
+async def test_page_read_tools_denied(
+    connect: Any,
+    fake: FakeConfluence,
+    mode: str,
+    tool: str,
+    page_id: str,
+    message: str,
+) -> None:
+    """Denied before any child, version, or view-statistics request is sent."""
+    client = await connect(mode, blocked="LEGAL", url=_site_url(tool))
+    text = _text(await client.call_tool(tool, PAGE_READ_TOOLS[tool](page_id)))
+    assert message in json.loads(text)["error"]
+    assert "secret" not in text.lower()
+    assert _non_lookup_requests(fake) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", list(PAGE_READ_TOOLS))
+async def test_page_read_tools_allowed_and_readonly_space_served(
+    connect: Any, fake: FakeConfluence, mode: str, tool: str
+) -> None:
+    """ENG is read-only, which does not restrict reads."""
+    client = await connect(mode, blocked="LEGAL", readonly="ENG", url=_site_url(tool))
+    result = json.loads(
+        _text(await client.call_tool(tool, PAGE_READ_TOOLS[tool](ALLOWED_PAGE)))
+    )
+    assert "error" not in result
+    if tool == "get_page_children":
+        assert any("child" in path for path in _non_lookup_requests(fake))
+        if mode == V1:
+            assert [c["title"] for c in result["results"]] == [SECRET_CHILD]
+    elif tool == "get_page_history":
+        assert "secret body" in result["content"]["value"]
+    elif tool == "get_page_diff":
+        assert result["page_id"] == ALLOWED_PAGE
+        assert result["title"] == f"Page {ALLOWED_PAGE}"
+    else:
+        assert result["total_views"] == VIEW_COUNT
+
+
+_HISTORY_V1 = ["/rest/api/content/100", "/rest/api/content/100/property"]
+
+
+def _history_v2(version: int) -> list[str]:
+    return [
+        "/api/v2/pages/100/versions",
+        f"/api/v2/versions/100v{version}",
+        "/api/v2/spaces/9001",  # space key of the returned version
+        "/api/v2/pages/100/properties",
+    ]
+
+
+# Requests each tool makes for page 100 when no block list is configured:
+# the tool's own requests only, with no space lookup added by the check.
+# The v2 child listing is not pinned; only the absence of lookups is checked.
+PAGE_READ_REQUESTS: dict[str, dict[str, list[str]]] = {
+    V1: {
+        "get_page_children": [
+            "/rest/api/content/100/child/page",
+            "/rest/api/content/100/child/folder",
+        ],
+        "get_page_history": _HISTORY_V1,
+        "get_page_diff": _HISTORY_V1 + _HISTORY_V1,
+        "get_page_views": [
+            "/rest/api/content/100",  # page title
+            "/rest/api/analytics/content/100/views",
+        ],
+    },
+    V2: {
+        "get_page_history": _history_v2(1),
+        "get_page_diff": _history_v2(1) + _history_v2(2),
+        "get_page_views": [
+            "/rest/api/content/100",  # page title (410 behind the gateway)
+            "/rest/api/analytics/content/100/views",
+        ],
+    },
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", list(PAGE_READ_TOOLS))
+@pytest.mark.parametrize("readonly", [None, "LEGAL"], ids=["no-lists", "readonly"])
+async def test_page_read_tools_without_block_list_make_no_space_lookups(
+    connect: Any, fake: FakeConfluence, mode: str, tool: str, readonly: str | None
+) -> None:
+    """Without a block list, reads are served and the check sends nothing."""
+    client = await connect(mode, blocked=None, readonly=readonly, url=_site_url(tool))
+    text = _text(await client.call_tool(tool, PAGE_READ_TOOLS[tool](BLOCKED_PAGE)))
+    assert "CONFLUENCE_SPACES" not in text
+    assert fake.requests
+    assert not any(_is_content_lookup(*request) for request in fake.requests)
+    if tool in PAGE_READ_REQUESTS[mode]:
+        assert fake.paths == PAGE_READ_REQUESTS[mode][tool]
+
+
+@pytest.mark.usefixtures("http")
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(
+    ("blocked", "message"),
+    [("LEGAL", None), ("ENG", "'ENG' is blocked")],
+    ids=["other-space-blocked", "folder-space-blocked"],
+)
+def test_folder_children_check_uses_folder_space(
+    fake: FakeConfluence, mode: str, blocked: str, message: str | None
+) -> None:
+    """The check get_page_children runs resolves a folder ID to its space."""
+    fetcher = _fetcher(mode, blocked=blocked)
+    if message is None:
+        fetcher.check_content_access(ALLOWED_FOLDER)
+    else:
+        with pytest.raises(ProjectAccessError, match=message):
+            fetcher.check_content_access(ALLOWED_FOLDER)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+async def test_get_page_children_of_folder_in_blocked_space_denied(
+    connect: Any, fake: FakeConfluence, mode: str
+) -> None:
+    client = await connect(mode, blocked="ENG")
+    text = _text(
+        await client.call_tool("get_page_children", {"parent_id": ALLOWED_FOLDER})
+    )
+    assert "'ENG' is blocked" in json.loads(text)["error"]
+    assert _non_lookup_requests(fake) == []
 
 
 # ---------------------------------------------------------------------------

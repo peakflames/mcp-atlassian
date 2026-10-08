@@ -39,6 +39,12 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
   contents are returned.
 - `confluence_get_comments` and `confluence_get_space_page_tree` now enforce
   `CONFLUENCE_SPACES_BLOCKED`.
+- `confluence_get_page_children`, `confluence_get_page_history`,
+  `confluence_get_page_diff`, and `confluence_get_page_views` now enforce
+  `CONFLUENCE_SPACES_BLOCKED`. The space of the page (for
+  `confluence_get_page_children`, the parent page) is checked before child
+  pages, page versions, or view statistics are read, and the request is
+  denied when that space cannot be determined while a block list is set.
 - `confluence_add_label`, `confluence_upload_attachment`,
   `confluence_upload_attachments`, and `confluence_delete_attachment` now
   enforce `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY` for the

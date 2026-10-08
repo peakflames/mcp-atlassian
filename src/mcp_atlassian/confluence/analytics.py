@@ -8,6 +8,7 @@ Server/Data Center instances do not support this API.
 """
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -25,12 +26,15 @@ class AnalyticsMixin:
     - self.confluence: Atlassian Confluence client
     - self.config: ConfluenceConfig instance
     - self.v2_adapter: Optional ConfluenceV2Adapter for OAuth
+    - self.check_content_access: Per-space access check (ConfluenceClient)
     """
 
-    # Type hints for attributes expected from the base class
+    # Type hints for attributes expected from the base class. These are
+    # annotations only: defining them here would shadow the base class.
     confluence: Any
     config: Any
     v2_adapter: Any
+    check_content_access: Callable[..., None]
 
     def get_page_views(
         self,
@@ -50,6 +54,8 @@ class AnalyticsMixin:
 
         Raises:
             ValueError: If the page is not found or API fails
+            ProjectAccessError: If the page's space is blocked, or cannot be
+                determined while CONFLUENCE_SPACES_BLOCKED is set
             HTTPError: If authentication fails (401/403 are propagated)
         """
         if not self.config.is_cloud:
@@ -57,6 +63,8 @@ class AnalyticsMixin:
                 "Page view analytics is only available for Confluence Cloud. "
                 "Server/Data Center instances do not support the Analytics API."
             )
+
+        self.check_content_access(page_id)
 
         # Get page title if requested
         page_title = None
