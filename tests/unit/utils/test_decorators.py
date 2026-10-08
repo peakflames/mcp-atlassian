@@ -258,22 +258,266 @@ async def test_check_write_access_rejects_readonly_confluence_space():
 
 @pytest.mark.asyncio
 async def test_check_write_access_batch_rejects_blocked_project():
-    """batch_create_issues must be rejected when any item is in a BLOCKED project."""
+    """batch_create_issues must be rejected when any item is in a BLOCKED project.
 
-    @check_write_access
-    async def batch_create_issues(ctx, issues_data):
-        return "ok"
-
+    Calls the real tool function (not a stub) and binds the argument through
+    the tool's own signature, so a parameter rename on the tool cannot leave
+    the guard reading a name the tool no longer has.
+    """
+    import inspect
     import json
 
+    from mcp_atlassian.servers.jira import batch_create_issues
+
+    tool_fn = batch_create_issues.fn
     issues = [
-        {"project_key": "SAFE", "summary": "ok"},
-        {"project_key": "PRIV", "summary": "blocked"},
+        {"project_key": "SAFE", "summary": "ok", "issue_type": "Task"},
+        {"project_key": "PRIV", "summary": "blocked", "issue_type": "Task"},
     ]
     jira_cfg = _make_jira_config(projects_blocked="PRIV")
     ctx = ContextWithAccess(jira_config=jira_cfg)
+    bound = inspect.signature(tool_fn).bind(ctx, issues=json.dumps(issues))
+    kwargs = {k: v for k, v in bound.arguments.items() if k != "ctx"}
     with pytest.raises(ToolError, match="blocked"):
-        await batch_create_issues(ctx, issues_data=json.dumps(issues))
+        await tool_fn(ctx, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_key", [" PRIV", "PRIV ", " priv "])
+async def test_check_write_access_strips_direct_project_key(project_key):
+    """A direct project_key is compared after trimming whitespace.
+
+    Calls the real create_issue tool function; the MCP schema pattern on
+    ``project_key`` is not applied on this path, so the guard itself is tested.
+    """
+    from mcp_atlassian.servers.jira import create_issue
+
+    ctx = ContextWithAccess(jira_config=_make_jira_config(projects_blocked="PRIV"))
+    with pytest.raises(ToolError, match="blocked"):
+        await create_issue.fn(
+            ctx, project_key=project_key, summary="s", issue_type="Task"
+        )
+
+
+@pytest.mark.asyncio
+async def test_check_write_access_rejects_non_key_direct_project_key():
+    from mcp_atlassian.servers.jira import create_issue
+
+    ctx = ContextWithAccess(jira_config=_make_jira_config(projects_blocked="PRIV"))
+    with pytest.raises(ToolError, match="Cannot determine the Jira project"):
+        await create_issue.fn(ctx, project_key="10000", summary="s", issue_type="Task")
+
+
+# ---------------------------------------------------------------------------
+# Guard kwarg names vs. real tool signatures (mechanical audit)
+# ---------------------------------------------------------------------------
+
+
+def _guard_kwarg_names() -> set[str]:
+    """Every tool kwarg name ``check_write_access`` reads via ``kwargs.get``.
+
+    Parsed from the decorator source so literal names, inline tuples and
+    module-level tuple constants are all picked up.
+    """
+    import ast
+    from pathlib import Path
+
+    from mcp_atlassian.utils import decorators
+
+    tree = ast.parse(Path(decorators.__file__).read_text(encoding="utf-8"))
+
+    def str_elts(node: ast.AST) -> list[str]:
+        if isinstance(node, ast.Tuple | ast.List):
+            return [
+                e.value
+                for e in node.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)
+            ]
+        return []
+
+    module_tuples: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    module_tuples[target.id] = str_elts(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                module_tuples[node.target.id] = str_elts(node.value)
+
+    func = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "check_write_access"
+    )
+    loop_values: dict[str, list[str]] = {}
+    for node in ast.walk(func):
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+            values = str_elts(node.iter)
+            if isinstance(node.iter, ast.Name):
+                values = module_tuples.get(node.iter.id, [])
+            loop_values.setdefault(node.target.id, []).extend(values)
+
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "kwargs"
+            and node.args
+        ):
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                names.add(arg.value)
+            elif isinstance(arg, ast.Name):
+                assert loop_values.get(arg.id), (
+                    f"cannot resolve guard kwarg variable {arg.id!r}"
+                )
+                names.update(loop_values[arg.id])
+    assert names, "no kwargs.get(...) reads found in check_write_access"
+    return names
+
+
+def _guarded_tool_params(module_name: str) -> dict[str, set[str]]:
+    """Parameter names of every tool in a server module using check_write_access.
+
+    Decorators are read from the module source; parameter names come from the
+    real tool objects' signatures.
+    """
+    import ast
+    import importlib
+    import inspect
+    from pathlib import Path
+
+    module = importlib.import_module(module_name)
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    guarded = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+        and any(
+            isinstance(d, ast.Name) and d.id == "check_write_access"
+            for d in node.decorator_list
+        )
+    ]
+    tools: dict[str, set[str]] = {}
+    for name in guarded:
+        tool = getattr(module, name)
+        fn = getattr(tool, "fn", tool)
+        tools[name] = set(inspect.signature(fn).parameters) - {"ctx"}
+    return tools
+
+
+# Which guarded tools each guard kwarg is meant for. A new guard kwarg must be
+# added here, and every listed tool must really have that parameter.
+_GUARD_KWARG_TARGETS: dict[str, tuple[str, set[str]]] = {
+    "project_key": (
+        "jira",
+        {"create_issue", "create_version", "batch_create_versions"},
+    ),
+    "issue_key": (
+        "jira",
+        {
+            "add_watcher",
+            "remove_watcher",
+            "update_issue",
+            "delete_issue",
+            "add_comment",
+            "edit_comment",
+            "add_worklog",
+            "link_to_epic",
+            "create_remote_issue_link",
+            "transition_issue",
+            "update_proforma_form_answers",
+        },
+    ),
+    "inward_issue_key": ("jira", {"create_issue_link"}),
+    "outward_issue_key": ("jira", {"create_issue_link"}),
+    "epic_key": ("jira", {"link_to_epic"}),
+    "issue_keys": ("jira", {"add_issues_to_sprint"}),
+    "fields": ("jira", {"update_issue", "transition_issue"}),
+    "additional_fields": ("jira", {"create_issue", "update_issue"}),
+    "issues": ("jira", {"batch_create_issues"}),
+    "space_key": ("confluence", {"create_page"}),
+    "target_space_key": ("confluence", {"move_page"}),
+    "page_id": ("confluence", {"update_page", "delete_page", "move_page"}),
+}
+
+# ID parameters on Jira write tools that name something inside the issue the
+# tool already identifies by issue_key, or a user; no separate project.
+_JIRA_NON_PROJECT_ID_PARAMS = {"comment_id", "form_id", "transition_id", "account_id"}
+
+# Board, sprint and link IDs; their project is only available via an API lookup.
+_JIRA_LOOKUP_ONLY_ID_PARAMS = {"board_id", "sprint_id", "link_id"}
+
+
+def _all_guarded_tools() -> dict[str, dict[str, set[str]]]:
+    return {
+        "jira": _guarded_tool_params("mcp_atlassian.servers.jira"),
+        "confluence": _guarded_tool_params("mcp_atlassian.servers.confluence"),
+    }
+
+
+def test_guarded_tool_discovery_finds_write_tools():
+    tools = _all_guarded_tools()
+    assert {"batch_create_issues", "link_to_epic", "add_issues_to_sprint"} <= set(
+        tools["jira"]
+    )
+    assert "create_page" in tools["confluence"]
+
+
+def test_every_guard_kwarg_exists_on_a_guarded_tool():
+    """Each name the guard reads must be a real parameter of some guarded tool."""
+    tools = _all_guarded_tools()
+    all_params = set().union(*tools["jira"].values(), *tools["confluence"].values())
+    missing = sorted(_guard_kwarg_names() - all_params)
+    assert not missing, f"guard reads kwargs no guarded tool has: {missing}"
+
+
+def test_guard_kwargs_exist_on_their_intended_tools():
+    tools = _all_guarded_tools()
+    guard_names = _guard_kwarg_names()
+    assert guard_names == set(_GUARD_KWARG_TARGETS), (
+        "guard kwarg names and _GUARD_KWARG_TARGETS differ: "
+        f"{sorted(guard_names ^ set(_GUARD_KWARG_TARGETS))}"
+    )
+    for kwarg, (service, tool_names) in _GUARD_KWARG_TARGETS.items():
+        for tool_name in tool_names:
+            assert tool_name in tools[service], f"{tool_name} is not a guarded tool"
+            assert kwarg in tools[service][tool_name], (
+                f"guard reads {kwarg!r} but {service} tool {tool_name!r} "
+                f"has parameters {sorted(tools[service][tool_name])}"
+            )
+
+
+def test_jira_write_tool_key_params_are_read_by_guard():
+    """Any key-like parameter on a Jira write tool must be read by the guard."""
+    guard_names = _guard_kwarg_names()
+    unguarded: list[str] = []
+    for tool_name, params in _all_guarded_tools()["jira"].items():
+        for param in params:
+            key_like = param.endswith(("_key", "_keys")) or param in {
+                "issues",
+                "fields",
+                "additional_fields",
+            }
+            if key_like and param not in guard_names:
+                unguarded.append(f"{tool_name}.{param}")
+            classified = _JIRA_NON_PROJECT_ID_PARAMS | _JIRA_LOOKUP_ONLY_ID_PARAMS
+            if param.endswith("_id") and param not in classified:
+                unguarded.append(f"{tool_name}.{param} (unclassified id)")
+    assert not unguarded, f"key-bearing parameters not read by the guard: {unguarded}"
+
+
+def test_jira_id_param_sets_match_write_tools():
+    """Every classified ID parameter still exists on some Jira write tool."""
+    all_params = set().union(*_all_guarded_tools()["jira"].values())
+    stale = sorted(
+        (_JIRA_NON_PROJECT_ID_PARAMS | _JIRA_LOOKUP_ONLY_ID_PARAMS) - all_params
+    )
+    assert not stale, f"classified ID parameters no write tool has: {stale}"
 
 
 @pytest.mark.asyncio
