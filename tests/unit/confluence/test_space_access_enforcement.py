@@ -838,7 +838,7 @@ def _site_url(tool: str) -> str:
 
 def _is_content_lookup(path: str, query: dict[str, list[str]]) -> bool:
     """Whether a request is the access check reading a content item's space."""
-    if re.fullmatch(r"/api/v2/(pages|blogposts|embeds)/\d+", path):
+    if re.fullmatch(r"/api/v2/(pages|blogposts|embeds|folders)/\d+", path):
         return True
     return bool(re.fullmatch(r"/rest/api/content/\d+", path)) and query.get(
         "expand"
@@ -960,6 +960,38 @@ async def test_page_read_tools_without_block_list_make_no_space_lookups(
     assert not any(_is_content_lookup(*request) for request in fake.requests)
     if tool in PAGE_READ_REQUESTS[mode]:
         assert fake.paths == PAGE_READ_REQUESTS[mode][tool]
+
+
+@pytest.mark.usefixtures("http")
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(
+    ("blocked", "message"),
+    [("LEGAL", None), ("ENG", "'ENG' is blocked")],
+    ids=["other-space-blocked", "folder-space-blocked"],
+)
+def test_folder_children_check_uses_folder_space(
+    fake: FakeConfluence, mode: str, blocked: str, message: str | None
+) -> None:
+    """The check get_page_children runs resolves a folder ID to its space."""
+    fetcher = _fetcher(mode, blocked=blocked)
+    if message is None:
+        fetcher.check_content_access(ALLOWED_FOLDER)
+    else:
+        with pytest.raises(ProjectAccessError, match=message):
+            fetcher.check_content_access(ALLOWED_FOLDER)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", MODES)
+async def test_get_page_children_of_folder_in_blocked_space_denied(
+    connect: Any, fake: FakeConfluence, mode: str
+) -> None:
+    client = await connect(mode, blocked="ENG")
+    text = _text(
+        await client.call_tool("get_page_children", {"parent_id": ALLOWED_FOLDER})
+    )
+    assert "'ENG' is blocked" in json.loads(text)["error"]
+    assert _non_lookup_requests(fake) == []
 
 
 # ---------------------------------------------------------------------------
