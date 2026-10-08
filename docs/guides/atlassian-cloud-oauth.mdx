@@ -68,7 +68,7 @@ Granular scopes are required for v2 API endpoints (`/api/v2/...`). Classic scope
 | Scope | Required by |
 |---|---|
 | `read:page:confluence` | `confluence_get_page` (v2 `/api/v2/pages/{id}`); version and body of child pages in `confluence_get_page_children` (v2 `/api/v2/pages`) |
-| `read:hierarchical-content:confluence` | `confluence_get_page_children` (v2 `/api/v2/pages/{id}/direct-children`) |
+| `read:hierarchical-content:confluence` | `confluence_get_page_children` (v2 `/api/v2/pages/{id}/direct-children`, and `/api/v2/folders/{id}/direct-children` for a folder parent) |
 | `write:page:confluence` | `confluence_create_page`, `confluence_update_page` |
 | `read:space:confluence` | Space resolution in page tools |
 | `read:content:confluence` | Tools using v1 `/rest/api/content` |

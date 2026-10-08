@@ -549,12 +549,18 @@ def _child(child_id: str, child_type: str) -> dict[str, Any]:
     }
 
 
-def _paged_children(items: list[dict[str, Any]]) -> Any:
-    """Fake v2 session.get that pages ``items`` by the requested limit."""
+def _paged_children(
+    items: list[dict[str, Any]], children_url: str = CHILDREN_URL
+) -> Any:
+    """Fake v2 session.get that pages ``items`` by the requested limit.
 
-    def get(url: str, params: dict[str, Any] | None = None, **_: Any) -> Mock:
+    ``children_url`` serves the list; with a folder URL, the pages
+    endpoint answers 404 as it does for a folder ID.
+    """
+
+    def get(url: str, params: dict[str, Any] | None = None, **_: Any) -> Any:
         params = params or {}
-        if url == CHILDREN_URL:
+        if url == children_url:
             offset = int(params.get("cursor") or 0)
             size = int(params["limit"])
             payload: dict[str, Any] = {
@@ -563,10 +569,11 @@ def _paged_children(items: list[dict[str, Any]]) -> Any:
             }
             if offset + size < len(items):
                 payload["_links"]["next"] = (
-                    "/wiki/api/v2/pages/123/direct-children"
-                    f"?limit={size}&cursor={offset + size}"
+                    f"{children_url}?limit={size}&cursor={offset + size}"
                 )
             return _response(200, payload)
+        if url == CHILDREN_URL:
+            return _url_error_response(404, url)
         if url == f"{GATEWAY_URL}/api/v2/pages":
             return _response(
                 200,
@@ -731,6 +738,26 @@ class TestPageChildrenV2:
             FOLDER_CHILDREN_URL,
         ]
         assert calls[2].kwargs["params"] == {"limit": 250, "cursor": "abc"}
+
+    def test_folder_parent_applies_type_filter_start_and_limit(self) -> None:
+        items = [
+            _child("601", "page"),
+            _child("602", "folder"),
+            _child("603", "page"),
+            _child("604", "folder"),
+            _child("605", "page"),
+            _child("606", "page"),
+        ]
+        mixin = _mixin(PagesMixin)
+        mixin.confluence._session.get.side_effect = _paged_children(
+            items, children_url=FOLDER_CHILDREN_URL
+        )
+
+        children = mixin.get_page_children(
+            "123", start=1, limit=2, include_folders=False
+        )
+
+        assert [c.id for c in children] == ["603", "605"]
 
     def test_page_parent_makes_no_folder_request(self) -> None:
         mixin = _mixin(PagesMixin)

@@ -1336,12 +1336,12 @@ class ConfluenceV2Adapter:
                 )
 
             logger.debug(
-                f"Retrieved {len(converted)} children of page '{page_id}' with v2 API"
+                f"Retrieved {len(converted)} children of parent '{page_id}' with v2 API"
             )
             return converted
 
         except ChildListTruncatedError:
-            logger.error(f"Truncated child listing for page '{page_id}'")
+            logger.error(f"Truncated child listing for parent '{page_id}'")
             raise
         except HTTPError as e:
             # Error strings returned to clients must not contain request URLs:
@@ -1350,17 +1350,17 @@ class ConfluenceV2Adapter:
             status = e.response.status_code if e.response is not None else None
             if status in (401, 403):
                 logger.error(
-                    f"Authentication error getting children of page '{page_id}': {e}"
+                    f"Authentication error getting children of parent '{page_id}': {e}"
                 )
                 raise
-            logger.warning(f"HTTP error getting children of page '{page_id}': {e}")
+            logger.warning(f"HTTP error getting children of parent '{page_id}': {e}")
             if status == 404:
                 msg = f"Page not found or not accessible: {page_id}"
             else:
                 msg = f"Failed to get children of page '{page_id}': HTTP {status}"
             raise ValueError(msg) from e
         except Exception as e:
-            logger.error(f"Error getting children of page '{page_id}': {e}")
+            logger.error(f"Error getting children of parent '{page_id}': {e}")
             msg = f"Failed to get children of page '{page_id}': {type(e).__name__}"
             raise ValueError(msg) from e
 
@@ -1424,7 +1424,7 @@ class ConfluenceV2Adapter:
         # Returning what was collected would look like a complete
         # (possibly empty) list of children.
         msg = (
-            f"Could not list children of page '{parent_id}': stopped after "
+            f"Could not list children of parent '{parent_id}': stopped after "
             f"{max_pages} requests ({scanned} child items scanned) before "
             f"finding {start + limit} matching items"
         )
