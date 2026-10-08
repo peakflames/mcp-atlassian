@@ -1614,6 +1614,8 @@ async def download_attachment(
     confluence_fetcher = await get_confluence_fetcher(ctx)
 
     try:
+        confluence_fetcher.check_content_access(attachment_id)
+
         v2_adapter = confluence_fetcher._v2_adapter
 
         if v2_adapter:

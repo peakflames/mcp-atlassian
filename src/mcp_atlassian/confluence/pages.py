@@ -8,7 +8,11 @@ import requests
 from requests.exceptions import HTTPError
 
 from ..models.confluence import ConfluencePage
-from ..utils.access_control import ProjectAccessError, check_confluence_space_access
+from ..utils.access_control import (
+    ProjectAccessError,
+    check_confluence_content_space_access,
+    check_confluence_space_access,
+)
 from ..utils.decorators import handle_auth_errors
 from .client import ConfluenceClient
 from .utils import emoji_to_hex_id, extract_emoji_from_property
@@ -86,10 +90,20 @@ class PagesMixin(ConfluenceClient):
 
             space_key = page.get("space", {}).get("key", "")
 
-            # Enforce BLOCKED access control after fetching the page
-            if space_key:
+            # Enforce BLOCKED access control after fetching the page.
+            # Fail closed when a block list is set and the space key cannot
+            # be confirmed.
+            if self.config.spaces_blocked_set:
+                access_key: str | None = space_key or None
+                if v2_adapter:
+                    space_id = page.get("space", {}).get("id")
+                    access_key = (
+                        v2_adapter.get_space_key(str(space_id)) if space_id else None
+                    )
                 try:
-                    check_confluence_space_access(self.config, space_key, write=False)
+                    check_confluence_content_space_access(
+                        self.config, access_key, content_id=page_id, write=False
+                    )
                 except ProjectAccessError as exc:
                     raise ValueError(str(exc)) from exc
 
@@ -407,11 +421,19 @@ class PagesMixin(ConfluenceClient):
 
         Returns:
             ConfluencePage model containing the page content and metadata, or None if not found
+
+        Raises:
+            ValueError: If the space is listed in CONFLUENCE_SPACES_BLOCKED
         """
+        try:
+            check_confluence_space_access(self.config, space_key, write=False)
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
+
         try:
             # Directly try to find the page by title
             page = self.confluence.get_page_by_title(
-                space=space_key, title=title, expand="body.storage,version"
+                space=space_key, title=title, expand="body.storage,version,space"
             )
 
             if not page:
@@ -420,6 +442,19 @@ class PagesMixin(ConfluenceClient):
                     f"The space may be invalid, the page may not exist, or permissions may be insufficient."
                 )
                 return None
+
+            # Check the space the page was actually returned from.
+            if self.config.spaces_blocked_set:
+                page_space = page.get("space")
+                returned_key = (
+                    page_space.get("key") if isinstance(page_space, dict) else None
+                )
+                check_confluence_content_space_access(
+                    self.config,
+                    str(returned_key) if returned_key else None,
+                    content_id=str(page.get("id", "")),
+                    write=False,
+                )
 
             try:
                 content = page["body"]["storage"]["value"]
@@ -455,6 +490,8 @@ class PagesMixin(ConfluenceClient):
                 page_width=page_width,
             )
 
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
         except KeyError as e:
             logger.error(f"Missing key in page data: {str(e)}")
             return None
@@ -567,8 +604,12 @@ class PagesMixin(ConfluenceClient):
             ConfluencePage model containing the new page's data
 
         Raises:
+            ProjectAccessError: If the parent's space is blocked, read-only,
+                or cannot be determined while a space list is set
             Exception: If there is an error creating the page
         """
+        if parent_id:
+            self.check_content_access(str(parent_id), write=True)
         try:
             # Determine body and representation based on content type
             if is_markdown:
@@ -664,8 +705,12 @@ class PagesMixin(ConfluenceClient):
             ConfluencePage model containing the updated page's data
 
         Raises:
+            ProjectAccessError: If a new parent's space is blocked, read-only,
+                or cannot be determined while a space list is set
             Exception: If there is an error updating the page
         """
+        if parent_id:
+            self.check_content_access(str(parent_id), write=True)
         try:
             # Determine body and representation based on content type
             if is_markdown:
@@ -901,8 +946,14 @@ class PagesMixin(ConfluenceClient):
             - Note: parent_id is None for root pages
 
         Raises:
+            ValueError: If the space is listed in CONFLUENCE_SPACES_BLOCKED
             Exception: If there is an error fetching pages
         """
+        try:
+            check_confluence_space_access(self.config, space_key, write=False)
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
+
         try:
             # Paginate using the raw API to access _links.next for reliable
             # truncation detection. The higher-level get_all_pages_from_space()
@@ -1162,12 +1213,16 @@ class PagesMixin(ConfluenceClient):
         Raises:
             ValueError: If neither target_parent_id nor target_space_key
                 is provided.
+            ProjectAccessError: If the target's space is blocked, read-only,
+                or cannot be determined while a space list is set.
             MCPAtlassianAuthenticationError: If authentication fails.
         """
         if not target_parent_id and not target_space_key:
             raise ValueError(
                 "At least one of target_parent_id or target_space_key must be provided."
             )
+        if target_parent_id:
+            self.check_content_access(str(target_parent_id), write=True)
 
         try:
             # Use v2 adapter for OAuth authentication

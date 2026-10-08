@@ -22,8 +22,15 @@ class LabelsMixin(ConfluenceClient):
             List of ConfluenceLabel models containing label content and metadata
 
         Raises:
+            ProjectAccessError: If the content's space is blocked, or cannot
+                be determined while CONFLUENCE_SPACES_BLOCKED is set
             Exception: If there is an error getting the label
         """
+        self.check_content_access(page_id)
+        return self._read_page_labels(page_id)
+
+    def _read_page_labels(self, page_id: str) -> list[ConfluenceLabel]:
+        """Fetch labels for content whose access has already been checked."""
         try:
             v2_adapter = self._v2_adapter
             if v2_adapter:
@@ -69,8 +76,11 @@ class LabelsMixin(ConfluenceClient):
             Label model containing the updated list of labels
 
         Raises:
+            ProjectAccessError: If the content's space is blocked, read-only,
+                or cannot be determined while CONFLUENCE_SPACES_BLOCKED is set
             Exception: If there is an error adding the label
         """
+        self.check_content_access(page_id, write=True)
         try:
             logger.debug(f"Adding label with name '{name}' to page {page_id}")
 
@@ -80,8 +90,8 @@ class LabelsMixin(ConfluenceClient):
             }
             response = self.confluence.set_page_label(**update_kwargs)
 
-            # After update, refresh the page data
-            return self.get_page_labels(page_id)
+            # After update, refresh the page data (access was checked above)
+            return self._read_page_labels(page_id)
         except Exception as e:
             logger.error(f"Error adding label '{name}' to page {page_id}: {str(e)}")
             raise Exception(

@@ -181,7 +181,7 @@ class TestPagesMixin:
 
         # Verify API calls
         pages_mixin.confluence.get_page_by_title.assert_called_once_with(
-            space=space_key, title=title, expand="body.storage,version"
+            space=space_key, title=title, expand="body.storage,version,space"
         )
 
         # Verify result
@@ -200,7 +200,7 @@ class TestPagesMixin:
         # Assert
         assert result is None
         pages_mixin.confluence.get_page_by_title.assert_called_once_with(
-            space="NONEXISTENT", title="Page Title", expand="body.storage,version"
+            space="NONEXISTENT", title="Page Title", expand="body.storage,version,space"
         )
 
     def test_get_page_by_title_page_not_found(self, pages_mixin):
@@ -214,7 +214,7 @@ class TestPagesMixin:
         # Assert
         assert result is None
         pages_mixin.confluence.get_page_by_title.assert_called_once_with(
-            space="PROJ", title="Nonexistent Page", expand="body.storage,version"
+            space="PROJ", title="Nonexistent Page", expand="body.storage,version,space"
         )
 
     def test_get_page_by_title_error_handling(self, pages_mixin):

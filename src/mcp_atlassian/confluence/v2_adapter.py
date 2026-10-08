@@ -1529,3 +1529,115 @@ class ConfluenceV2Adapter:
             return None
         key = data.get("key") if isinstance(data, dict) else None
         return str(key) if key else None
+
+    def _get_json_or_none(self, url: str) -> tuple[int | None, dict[str, Any] | None]:
+        """GET ``url`` and return ``(status_code, json_dict)`` without raising.
+
+        Returns ``(None, None)`` if the request fails or the body is not a
+        JSON object, and ``(status, None)`` for non-200 responses.
+        """
+        try:
+            response = self.session.get(url)
+        except requests.RequestException as e:
+            logger.warning(f"Request to '{url}' failed: {e}")
+            return None, None
+        if response.status_code != 200:
+            return response.status_code, None
+        try:
+            data = response.json()
+        except ValueError as e:
+            logger.warning(f"Non-JSON response from '{url}': {e}")
+            return response.status_code, None
+        return response.status_code, data if isinstance(data, dict) else None
+
+    def _get_content_space_id(self, content_id: str) -> str | None:
+        """Find the space ID of a page, blog post, embed, folder, or attachment.
+
+        Attachments (``att`` prefix) carry no space ID in v2, so their
+        container (page, blog post, or custom content) is looked up instead.
+        Other IDs are tried as a page, then a blog post, an embed, and a
+        folder, moving on only when the previous endpoint returns 404.
+
+        Returns:
+            The space ID, or None if it cannot be determined.
+        """
+        if content_id.startswith("att"):
+            _, attachment = self._get_json_or_none(
+                f"{self.base_url}/api/v2/attachments/{content_id}"
+            )
+            return self._container_space_id(attachment) if attachment else None
+
+        for content_type in ("pages", "blogposts", "embeds", "folders"):
+            status, data = self._get_json_or_none(
+                f"{self.base_url}/api/v2/{content_type}/{content_id}"
+            )
+            if status == 404:
+                continue
+            space_id = data.get("spaceId") if data else None
+            return str(space_id) if space_id else None
+        return None
+
+    def _container_space_id(self, item: dict[str, Any]) -> str | None:
+        """Find the space ID of an attachment's or comment's container.
+
+        v2 attachments and comments carry the ID of the page, blog post, or
+        custom content they belong to rather than a space ID.
+        """
+        if item.get("spaceId"):
+            return str(item["spaceId"])
+        for field, content_type in (
+            ("pageId", "pages"),
+            ("blogPostId", "blogposts"),
+            ("customContentId", "custom-content"),
+        ):
+            parent_id = item.get(field)
+            if parent_id:
+                _, parent = self._get_json_or_none(
+                    f"{self.base_url}/api/v2/{content_type}/{parent_id}"
+                )
+                space_id = parent.get("spaceId") if parent else None
+                return str(space_id) if space_id else None
+        return None
+
+    def get_comment_space_key(self, comment_id: str) -> str | None:
+        """Get the space key of a footer or inline comment for access checks.
+
+        Tries the footer-comment endpoint, then the inline-comment endpoint on
+        404, and resolves the comment's container page or blog post.
+
+        Args:
+            comment_id: The comment ID
+
+        Returns:
+            The space key, or None if it cannot be determined
+        """
+        space_id = None
+        for comment_type in ("footer-comments", "inline-comments"):
+            status, comment = self._get_json_or_none(
+                f"{self.base_url}/api/v2/{comment_type}/{comment_id}"
+            )
+            if status == 404:
+                continue
+            space_id = self._container_space_id(comment) if comment else None
+            break
+        if not space_id:
+            logger.warning(f"Could not resolve the space of comment '{comment_id}'")
+            return None
+        return self.get_space_key(space_id)
+
+    def get_content_space_key(self, content_id: str) -> str | None:
+        """Get the space key of a content item for access-control checks.
+
+        Any lookup failure returns None so callers can fail closed.
+
+        Args:
+            content_id: A page, blog post, embed, folder, or attachment ID
+
+        Returns:
+            The space key, or None if it cannot be determined
+        """
+        space_id = self._get_content_space_id(content_id)
+        if not space_id:
+            logger.warning(f"Could not resolve the space of content '{content_id}'")
+            return None
+        return self.get_space_key(space_id)

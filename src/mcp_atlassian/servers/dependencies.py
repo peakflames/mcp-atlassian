@@ -51,6 +51,9 @@ class _ServiceSpec:
     on_validated: Callable[
         [str, Request, Any, str, str | None], None
     ]  # logging + email backfill
+    # Config fields copied from the global config into header-based PAT
+    # configs, which are otherwise built from request headers alone.
+    header_pat_global_fields: tuple[str, ...] = ()
 
 
 def _jira_on_validated(
@@ -161,6 +164,9 @@ def _confluence_spec() -> _ServiceSpec:
         get_session=lambda f: f.confluence._session,
         validate_fn=lambda f: f.get_current_user_info(),
         on_validated=_confluence_on_validated,
+        # Space access lists are server policy and must apply to every
+        # request, whatever credentials it carries.
+        header_pat_global_fields=("spaces_blocked", "spaces_readonly"),
     )
 
 
@@ -541,6 +547,21 @@ async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
                 f"Creating header-based {spec.name}Fetcher "
                 f"with URL: {url_header_val} and PAT token"
             )
+            # Carry server-side policy (e.g. Confluence space access lists)
+            # over from the global config. If the server has no global config
+            # for this service (header-only deployment), no lists are
+            # configured, so there is nothing to carry over.
+            inherited: dict[str, Any] = {}
+            if spec.header_pat_global_fields:
+                app_ctx = _get_app_lifespan_ctx(ctx)
+                global_cfg = (
+                    getattr(app_ctx, spec.config_attr, None) if app_ctx else None
+                )
+                if global_cfg is not None:
+                    inherited = {
+                        name: getattr(global_cfg, name)
+                        for name in spec.header_pat_global_fields
+                    }
             header_config = spec.config_class(
                 url=url_header_val,
                 auth_type="pat",
@@ -552,6 +573,7 @@ async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
                 socks_proxy=None,
                 custom_headers=None,
                 **spec.filter_kwargs,
+                **inherited,
             )
             return _create_and_validate(
                 request,
