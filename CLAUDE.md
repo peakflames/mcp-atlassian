@@ -22,6 +22,10 @@ suffix as a semver pre-release — Docker tags like `0.21.2-peakflames.1` are pu
 but `latest`, `0.21`, and `0` tags are NOT generated (semver pre-releases are excluded
 from those alias tags).
 
+The image is published to Docker Hub only when a version tag is pushed (or the
+workflow is run manually from a tag). Merges to `peakflames/main` and PRs build
+the image as a check but do not push it.
+
 ### `uv sync` PEP 440 issue
 
 Running `uv sync --frozen --all-extras --dev` locally will **fail** with:
