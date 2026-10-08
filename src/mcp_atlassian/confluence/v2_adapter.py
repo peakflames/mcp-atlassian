@@ -16,6 +16,13 @@ from .utils import emoji_to_hex_id, extract_emoji_from_property
 
 logger = logging.getLogger("mcp-atlassian")
 
+# Largest ``limit`` the v2 list endpoints accept.
+V2_MAX_PAGE_SIZE = 250
+
+
+class ChildListTruncatedError(ValueError):
+    """Raised when a child listing hits the request cap before it completes."""
+
 
 class ConfluenceV2Adapter:
     """Adapter for Confluence REST API v2 operations when using OAuth."""
@@ -1232,6 +1239,277 @@ class ConfluenceV2Adapter:
             )
         return results
 
+    def get_page_children(
+        self,
+        page_id: str,
+        *,
+        start: int = 0,
+        limit: int = 25,
+        include_folders: bool = True,
+        include_version: bool = True,
+        include_body: bool = False,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Get child pages (and optionally folders) of a page using v2 API.
+
+        Lists ``/api/v2/pages/{id}/direct-children`` and keeps only ``page``
+        and, when requested, ``folder`` items, in the order the API returns
+        them. If the pages endpoint returns 404, the ID is retried as a
+        folder via ``/api/v2/folders/{id}/direct-children``. The v2 list is
+        cursor-paginated, so ``start`` is applied by skipping that many
+        matching items while following ``_links.next``.
+
+        The children endpoint returns only ``id``, ``status``, ``title``,
+        ``type``, ``spaceId`` and ``childPosition``. When ``include_version``
+        or ``include_body`` is set, child pages are looked up in batches of
+        up to 250 via ``/api/v2/pages?id=...`` to add ``version`` and
+        ``body.storage``. Folders have no body and the batch lookup does not
+        cover them, so folders never carry a version or body on this path.
+        A failed space lookup only drops the ``space`` field (logged as a
+        warning); it does not fail the listing.
+
+        Args:
+            page_id: The ID of the parent page or folder
+            start: Number of matching child items to skip
+            limit: Maximum number of child items to return
+            include_folders: Whether to include child folders
+            include_version: Whether to add each child page's version
+            include_body: Whether to add each child page's storage body
+            max_pages: Safety cap on the number of list pages fetched
+
+        Returns:
+            List of child items in v1-compatible format
+
+        Raises:
+            HTTPError: If the API request fails with 401/403
+            ChildListTruncatedError: If ``max_pages`` requests did not reach
+                the end of the list or ``start + limit`` matching items
+            ValueError: If the parent is not found as a page or a folder,
+                or other errors. The message never contains the request URL.
+        """
+        if limit <= 0:
+            return []
+        wanted_types = {"page", "folder"} if include_folders else {"page"}
+        try:
+            try:
+                children = self._list_direct_children(
+                    "pages", page_id, wanted_types, start, limit, max_pages
+                )
+            except HTTPError as e:
+                if e.response is None or e.response.status_code != 404:
+                    raise
+                # A folder ID is not found on the pages endpoint; folders
+                # have their own direct-children endpoint with the same
+                # response shape.
+                children = self._list_direct_children(
+                    "folders", page_id, wanted_types, start, limit, max_pages
+                )
+
+            details: dict[str, dict[str, Any]] = {}
+            page_ids = [str(c["id"]) for c in children if c.get("type") == "page"]
+            if page_ids and (include_version or include_body):
+                details = self._get_pages_by_id(page_ids, include_body=include_body)
+                missing = [pid for pid in page_ids if pid not in details]
+                if missing:
+                    logger.warning(
+                        f"{len(missing)} child page(s) of page '{page_id}' were "
+                        "not returned by the page lookup; they are listed "
+                        "without version or body"
+                    )
+
+            spaces: dict[str, dict[str, Any] | None] = {}
+            converted = []
+            for child in children:
+                child_id = str(child.get("id"))
+                detail = details.get(child_id, {})
+                space_id = child.get("spaceId") or detail.get("spaceId")
+                if space_id and space_id not in spaces:
+                    spaces[space_id] = self._get_space_summary(str(space_id))
+                converted.append(
+                    self._convert_child_v2_to_v1(
+                        child,
+                        detail,
+                        spaces.get(space_id) if space_id else None,
+                        include_version=include_version,
+                        include_body=include_body,
+                    )
+                )
+
+            logger.debug(
+                f"Retrieved {len(converted)} children of parent '{page_id}' with v2 API"
+            )
+            return converted
+
+        except ChildListTruncatedError:
+            logger.error(f"Truncated child listing for parent '{page_id}'")
+            raise
+        except HTTPError as e:
+            # Error strings returned to clients must not contain request URLs:
+            # under OAuth they include the gateway path with the cloud ID.
+            # The full error is logged instead.
+            status = e.response.status_code if e.response is not None else None
+            if status in (401, 403):
+                logger.error(
+                    f"Authentication error getting children of parent '{page_id}': {e}"
+                )
+                raise
+            logger.warning(f"HTTP error getting children of parent '{page_id}': {e}")
+            if status == 404:
+                msg = f"Page not found or not accessible: {page_id}"
+            else:
+                msg = f"Failed to get children of page '{page_id}': HTTP {status}"
+            raise ValueError(msg) from e
+        except Exception as e:
+            logger.error(f"Error getting children of parent '{page_id}': {e}")
+            msg = f"Failed to get children of page '{page_id}': {type(e).__name__}"
+            raise ValueError(msg) from e
+
+    def _list_direct_children(
+        self,
+        parent_type: str,
+        parent_id: str,
+        wanted_types: set[str],
+        start: int,
+        limit: int,
+        max_pages: int,
+    ) -> list[dict[str, Any]]:
+        """Collect matching items from ``/api/v2/{parent_type}/{id}/direct-children``.
+
+        Args:
+            parent_type: ``pages`` or ``folders``
+            parent_id: The ID of the parent page or folder
+            wanted_types: Child ``type`` values to keep
+            start: Number of matching child items to skip
+            limit: Maximum number of child items to return
+            max_pages: Safety cap on the number of list pages fetched
+
+        Returns:
+            Matching child items in the order the API returns them
+
+        Raises:
+            HTTPError: If a request fails
+            ChildListTruncatedError: If ``max_pages`` requests did not reach
+                the end of the list or ``start + limit`` matching items
+        """
+        url = f"{self.base_url}/api/v2/{parent_type}/{parent_id}/direct-children"
+        children: list[dict[str, Any]] = []
+        skipped = 0
+        scanned = 0
+        # Always request the v2 maximum so that skipping ``start`` items
+        # and filtering out other content types cannot exhaust
+        # ``max_pages`` early.
+        params: dict[str, Any] = {"limit": V2_MAX_PAGE_SIZE}
+        for _ in range(max_pages):
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            for item in data.get("results", []):
+                scanned += 1
+                if item.get("type") not in wanted_types:
+                    continue
+                if skipped < start:
+                    skipped += 1
+                    continue
+                children.append(item)
+                if len(children) >= limit:
+                    return children
+
+            next_link = data.get("_links", {}).get("next")
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(next_link or "").query)
+            cursor = query.get("cursor", [None])[0]
+            if not cursor:
+                return children
+            params = {"limit": V2_MAX_PAGE_SIZE, "cursor": cursor}
+
+        # Returning what was collected would look like a complete
+        # (possibly empty) list of children.
+        msg = (
+            f"Could not list children of parent '{parent_id}': stopped after "
+            f"{max_pages} requests ({scanned} child items scanned) before "
+            f"finding {start + limit} matching items"
+        )
+        raise ChildListTruncatedError(msg)
+
+    def _get_pages_by_id(
+        self, page_ids: list[str], *, include_body: bool
+    ) -> dict[str, dict[str, Any]]:
+        """Look up pages via ``/api/v2/pages?id=...``, 250 IDs per request.
+
+        Args:
+            page_ids: Page IDs to look up
+            include_body: Whether to request the storage body
+
+        Returns:
+            Mapping of page ID to the v2 page object
+
+        Raises:
+            HTTPError: If a request fails
+        """
+        details: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(page_ids), V2_MAX_PAGE_SIZE):
+            chunk = page_ids[offset : offset + V2_MAX_PAGE_SIZE]
+            params: dict[str, Any] = {"id": chunk, "limit": len(chunk)}
+            if include_body:
+                params["body-format"] = "storage"
+            response = self.session.get(f"{self.base_url}/api/v2/pages", params=params)
+            response.raise_for_status()
+            for page in response.json().get("results", []):
+                details[str(page.get("id"))] = page
+        return details
+
+    def _get_space_summary(self, space_id: str) -> dict[str, Any] | None:
+        """Get a space's ID, key and name, or None if it cannot be read."""
+        url = f"{self.base_url}/api/v2/spaces/{space_id}"
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(f"Could not read space '{space_id}': {e}")
+            return None
+        if not isinstance(data, dict) or not data.get("key"):
+            return None
+        summary: dict[str, Any] = {"id": space_id, "key": data["key"]}
+        if data.get("name"):
+            summary["name"] = data["name"]
+        return summary
+
+    @staticmethod
+    def _convert_child_v2_to_v1(
+        child: dict[str, Any],
+        detail: dict[str, Any],
+        space: dict[str, Any] | None,
+        *,
+        include_version: bool,
+        include_body: bool,
+    ) -> dict[str, Any]:
+        """Convert a v2 child item (plus optional page detail) to v1 format."""
+        result: dict[str, Any] = {
+            "id": child.get("id"),
+            "type": child.get("type", "page"),
+            "status": child.get("status", "current"),
+            "title": child.get("title") or detail.get("title"),
+            "_links": detail.get("_links", {}),
+        }
+        if space:
+            result["space"] = space
+        version = detail.get("version")
+        if include_version and isinstance(version, dict):
+            v1_version: dict[str, Any] = {"number": version.get("number", 0)}
+            if version.get("createdAt"):
+                v1_version["when"] = version["createdAt"]
+            if version.get("message"):
+                v1_version["message"] = version["message"]
+            result["version"] = v1_version
+        if include_body and "body" in detail:
+            result["body"] = {
+                "storage": {
+                    "value": detail["body"].get("storage", {}).get("value", ""),
+                    "representation": "storage",
+                }
+            }
+        return result
+
     def get_space_key(self, space_id: str) -> str | None:
         """Get a space key from its ID, without falling back to the ID.
 
@@ -1251,3 +1529,115 @@ class ConfluenceV2Adapter:
             return None
         key = data.get("key") if isinstance(data, dict) else None
         return str(key) if key else None
+
+    def _get_json_or_none(self, url: str) -> tuple[int | None, dict[str, Any] | None]:
+        """GET ``url`` and return ``(status_code, json_dict)`` without raising.
+
+        Returns ``(None, None)`` if the request fails or the body is not a
+        JSON object, and ``(status, None)`` for non-200 responses.
+        """
+        try:
+            response = self.session.get(url)
+        except requests.RequestException as e:
+            logger.warning(f"Request to '{url}' failed: {e}")
+            return None, None
+        if response.status_code != 200:
+            return response.status_code, None
+        try:
+            data = response.json()
+        except ValueError as e:
+            logger.warning(f"Non-JSON response from '{url}': {e}")
+            return response.status_code, None
+        return response.status_code, data if isinstance(data, dict) else None
+
+    def _get_content_space_id(self, content_id: str) -> str | None:
+        """Find the space ID of a page, blog post, embed, folder, or attachment.
+
+        Attachments (``att`` prefix) carry no space ID in v2, so their
+        container (page, blog post, or custom content) is looked up instead.
+        Other IDs are tried as a page, then a blog post, an embed, and a
+        folder, moving on only when the previous endpoint returns 404.
+
+        Returns:
+            The space ID, or None if it cannot be determined.
+        """
+        if content_id.startswith("att"):
+            _, attachment = self._get_json_or_none(
+                f"{self.base_url}/api/v2/attachments/{content_id}"
+            )
+            return self._container_space_id(attachment) if attachment else None
+
+        for content_type in ("pages", "blogposts", "embeds", "folders"):
+            status, data = self._get_json_or_none(
+                f"{self.base_url}/api/v2/{content_type}/{content_id}"
+            )
+            if status == 404:
+                continue
+            space_id = data.get("spaceId") if data else None
+            return str(space_id) if space_id else None
+        return None
+
+    def _container_space_id(self, item: dict[str, Any]) -> str | None:
+        """Find the space ID of an attachment's or comment's container.
+
+        v2 attachments and comments carry the ID of the page, blog post, or
+        custom content they belong to rather than a space ID.
+        """
+        if item.get("spaceId"):
+            return str(item["spaceId"])
+        for field, content_type in (
+            ("pageId", "pages"),
+            ("blogPostId", "blogposts"),
+            ("customContentId", "custom-content"),
+        ):
+            parent_id = item.get(field)
+            if parent_id:
+                _, parent = self._get_json_or_none(
+                    f"{self.base_url}/api/v2/{content_type}/{parent_id}"
+                )
+                space_id = parent.get("spaceId") if parent else None
+                return str(space_id) if space_id else None
+        return None
+
+    def get_comment_space_key(self, comment_id: str) -> str | None:
+        """Get the space key of a footer or inline comment for access checks.
+
+        Tries the footer-comment endpoint, then the inline-comment endpoint on
+        404, and resolves the comment's container page or blog post.
+
+        Args:
+            comment_id: The comment ID
+
+        Returns:
+            The space key, or None if it cannot be determined
+        """
+        space_id = None
+        for comment_type in ("footer-comments", "inline-comments"):
+            status, comment = self._get_json_or_none(
+                f"{self.base_url}/api/v2/{comment_type}/{comment_id}"
+            )
+            if status == 404:
+                continue
+            space_id = self._container_space_id(comment) if comment else None
+            break
+        if not space_id:
+            logger.warning(f"Could not resolve the space of comment '{comment_id}'")
+            return None
+        return self.get_space_key(space_id)
+
+    def get_content_space_key(self, content_id: str) -> str | None:
+        """Get the space key of a content item for access-control checks.
+
+        Any lookup failure returns None so callers can fail closed.
+
+        Args:
+            content_id: A page, blog post, embed, folder, or attachment ID
+
+        Returns:
+            The space key, or None if it cannot be determined
+        """
+        space_id = self._get_content_space_id(content_id)
+        if not space_id:
+            logger.warning(f"Could not resolve the space of content '{content_id}'")
+            return None
+        return self.get_space_key(space_id)

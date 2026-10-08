@@ -98,7 +98,7 @@ class TestLabelsMixin:
         # Mock add_page_label to return a list of ConfluenceLabels
         with patch.object(
             labels_mixin,
-            "get_page_labels",
+            "_read_page_labels",
             return_value=ConfluenceLabel(
                 id="123456789",
                 name=name,

@@ -27,7 +27,12 @@ class CommentsMixin(ConfluenceClient):
 
         Returns:
             List of ConfluenceComment models containing comment content and metadata
+
+        Raises:
+            ProjectAccessError: If the page's space is blocked, or cannot be
+                determined while CONFLUENCE_SPACES_BLOCKED is set
         """
+        self.check_content_access(page_id)
         try:
             # Get page info to extract space details
             page = self.confluence.get_page_by_id(page_id=page_id, expand="space")
@@ -145,7 +150,12 @@ class CommentsMixin(ConfluenceClient):
 
         Returns:
             ConfluenceComment object if reply was added successfully, None otherwise
+
+        Raises:
+            ProjectAccessError: If the comment's space is blocked or read-only,
+                or cannot be determined while CONFLUENCE_SPACES_BLOCKED is set
         """
+        self.check_content_access(comment_id, write=True, is_comment=True)
         try:
             # Convert markdown to Confluence storage format if needed
             if not content.strip().startswith("<"):

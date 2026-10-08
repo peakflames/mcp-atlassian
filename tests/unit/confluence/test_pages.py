@@ -181,7 +181,7 @@ class TestPagesMixin:
 
         # Verify API calls
         pages_mixin.confluence.get_page_by_title.assert_called_once_with(
-            space=space_key, title=title, expand="body.storage,version"
+            space=space_key, title=title, expand="body.storage,version,space"
         )
 
         # Verify result
@@ -200,7 +200,7 @@ class TestPagesMixin:
         # Assert
         assert result is None
         pages_mixin.confluence.get_page_by_title.assert_called_once_with(
-            space="NONEXISTENT", title="Page Title", expand="body.storage,version"
+            space="NONEXISTENT", title="Page Title", expand="body.storage,version,space"
         )
 
     def test_get_page_by_title_page_not_found(self, pages_mixin):
@@ -214,7 +214,7 @@ class TestPagesMixin:
         # Assert
         assert result is None
         pages_mixin.confluence.get_page_by_title.assert_called_once_with(
-            space="PROJ", title="Nonexistent Page", expand="body.storage,version"
+            space="PROJ", title="Nonexistent Page", expand="body.storage,version,space"
         )
 
     def test_get_page_by_title_error_handling(self, pages_mixin):
@@ -639,11 +639,9 @@ class TestPagesMixin:
             "API Error"
         )
 
-        # Act
-        results = pages_mixin.get_page_children(page_id=parent_id)
-
-        # Assert - should return empty list on error, not raise exception
-        assert len(results) == 0
+        # Act/Assert - the error is raised, not reported as "no children"
+        with pytest.raises(Exception, match="Error fetching child pages"):
+            pages_mixin.get_page_children(page_id=parent_id)
 
     def test_get_page_children_folder_error_graceful(self, pages_mixin):
         """Test that folder fetch errors don't fail the whole operation."""

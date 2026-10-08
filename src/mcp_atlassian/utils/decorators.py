@@ -167,6 +167,7 @@ def check_write_access(func: F) -> F:
             # Late import avoids circular dependency at module load time
             from mcp_atlassian.utils.access_control import (  # noqa: PLC0415
                 ProjectAccessError,
+                check_confluence_content_space_access,
                 check_confluence_space_access,
                 check_jira_project_access,
             )
@@ -258,27 +259,25 @@ def check_write_access(func: F) -> F:
 
                 page_id = kwargs.get("page_id")
                 if page_id:
-                    try:
-                        from mcp_atlassian.servers.dependencies import (  # noqa: PLC0415
-                            get_confluence_fetcher,
-                        )
+                    from mcp_atlassian.servers.dependencies import (  # noqa: PLC0415
+                        get_confluence_fetcher,
+                    )
 
-                        conf_fetcher = await get_confluence_fetcher(ctx)
-                        resolved_space = conf_fetcher.get_page_space_key(str(page_id))
-                        if resolved_space:
-                            try:
-                                check_confluence_space_access(
-                                    conf_config, resolved_space, write=True
-                                )
-                            except ProjectAccessError as exc:
-                                raise ValueError(str(exc)) from exc
-                    except ValueError:
-                        raise
-                    except Exception as e:
-                        logger.warning(
-                            f"Could not resolve space for page '{page_id}' "
-                            f"during write-access check: {e}"
-                        )
+                    # Fails closed: denied when the page's space cannot be
+                    # determined while a space list applies. The space is
+                    # checked against both the server's lists and the
+                    # per-request fetcher's, so a per-request config that
+                    # lacks the lists cannot weaken the check.
+                    conf_fetcher = await get_confluence_fetcher(ctx)
+                    content_id = str(page_id)
+                    page_space = conf_fetcher.resolve_content_space_key(content_id)
+                    try:
+                        for config in (conf_config, conf_fetcher.config):
+                            check_confluence_content_space_access(
+                                config, page_space, content_id=content_id, write=True
+                            )
+                    except ProjectAccessError as exc:
+                        raise ValueError(str(exc)) from exc
 
         return await func(ctx, *args, **kwargs)
 

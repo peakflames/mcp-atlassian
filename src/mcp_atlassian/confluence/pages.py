@@ -8,7 +8,11 @@ import requests
 from requests.exceptions import HTTPError
 
 from ..models.confluence import ConfluencePage
-from ..utils.access_control import ProjectAccessError, check_confluence_space_access
+from ..utils.access_control import (
+    ProjectAccessError,
+    check_confluence_content_space_access,
+    check_confluence_space_access,
+)
 from ..utils.decorators import handle_auth_errors
 from .client import ConfluenceClient
 from .utils import emoji_to_hex_id, extract_emoji_from_property
@@ -86,10 +90,20 @@ class PagesMixin(ConfluenceClient):
 
             space_key = page.get("space", {}).get("key", "")
 
-            # Enforce BLOCKED access control after fetching the page
-            if space_key:
+            # Enforce BLOCKED access control after fetching the page.
+            # Fail closed when a block list is set and the space key cannot
+            # be confirmed.
+            if self.config.spaces_blocked_set:
+                access_key: str | None = space_key or None
+                if v2_adapter:
+                    space_id = page.get("space", {}).get("id")
+                    access_key = (
+                        v2_adapter.get_space_key(str(space_id)) if space_id else None
+                    )
                 try:
-                    check_confluence_space_access(self.config, space_key, write=False)
+                    check_confluence_content_space_access(
+                        self.config, access_key, content_id=page_id, write=False
+                    )
                 except ProjectAccessError as exc:
                     raise ValueError(str(exc)) from exc
 
@@ -407,11 +421,19 @@ class PagesMixin(ConfluenceClient):
 
         Returns:
             ConfluencePage model containing the page content and metadata, or None if not found
+
+        Raises:
+            ValueError: If the space is listed in CONFLUENCE_SPACES_BLOCKED
         """
+        try:
+            check_confluence_space_access(self.config, space_key, write=False)
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
+
         try:
             # Directly try to find the page by title
             page = self.confluence.get_page_by_title(
-                space=space_key, title=title, expand="body.storage,version"
+                space=space_key, title=title, expand="body.storage,version,space"
             )
 
             if not page:
@@ -420,6 +442,19 @@ class PagesMixin(ConfluenceClient):
                     f"The space may be invalid, the page may not exist, or permissions may be insufficient."
                 )
                 return None
+
+            # Check the space the page was actually returned from.
+            if self.config.spaces_blocked_set:
+                page_space = page.get("space")
+                returned_key = (
+                    page_space.get("key") if isinstance(page_space, dict) else None
+                )
+                check_confluence_content_space_access(
+                    self.config,
+                    str(returned_key) if returned_key else None,
+                    content_id=str(page.get("id", "")),
+                    write=False,
+                )
 
             try:
                 content = page["body"]["storage"]["value"]
@@ -455,6 +490,8 @@ class PagesMixin(ConfluenceClient):
                 page_width=page_width,
             )
 
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
         except KeyError as e:
             logger.error(f"Missing key in page data: {str(e)}")
             return None
@@ -567,8 +604,12 @@ class PagesMixin(ConfluenceClient):
             ConfluencePage model containing the new page's data
 
         Raises:
+            ProjectAccessError: If the parent's space is blocked, read-only,
+                or cannot be determined while a space list is set
             Exception: If there is an error creating the page
         """
+        if parent_id:
+            self.check_content_access(str(parent_id), write=True)
         try:
             # Determine body and representation based on content type
             if is_markdown:
@@ -664,8 +705,12 @@ class PagesMixin(ConfluenceClient):
             ConfluencePage model containing the updated page's data
 
         Raises:
+            ProjectAccessError: If a new parent's space is blocked, read-only,
+                or cannot be determined while a space list is set
             Exception: If there is an error updating the page
         """
+        if parent_id:
+            self.check_content_access(str(parent_id), write=True)
         try:
             # Determine body and representation based on content type
             if is_markdown:
@@ -731,6 +776,7 @@ class PagesMixin(ConfluenceClient):
             logger.error(f"Error updating page {page_id}: {str(e)}")
             raise Exception(f"Failed to update page {page_id}: {str(e)}") from e
 
+    @handle_auth_errors("Confluence API")
     def get_page_children(
         self,
         page_id: str,
@@ -744,6 +790,12 @@ class PagesMixin(ConfluenceClient):
         """
         Get child pages and folders of a specific Confluence page.
 
+        Cloud OAuth uses the v2 ``direct-children`` endpoint; Server/Data
+        Center and non-OAuth Cloud use the v1 child endpoints. On the v2 path
+        ``expand`` is only checked for ``version`` and ``body`` (other expand
+        fields have no v2 equivalent here and are ignored), ``start``/``limit``
+        apply to pages and folders together, and folders carry no version.
+
         Args:
             page_id: The ID of the parent page
             start: The starting index for pagination
@@ -755,22 +807,50 @@ class PagesMixin(ConfluenceClient):
 
         Returns:
             List of ConfluencePage models containing the child pages and folders
+
+        Raises:
+            MCPAtlassianAuthenticationError: If authentication fails (401/403)
+            HTTPError: If the v1 API request fails with another HTTP error
+            ValueError: If the v2 API request fails or the listing would be
+                incomplete
+            Exception: If the child pages cannot be retrieved
         """
+        # Raises ProjectAccessError if the parent's space is blocked, or cannot
+        # be determined while CONFLUENCE_SPACES_BLOCKED is set.
+        self.check_content_access(page_id)
+
         try:
-            # Use the Atlassian Python API's get_page_child_by_type method
-            # First, get child pages
-            page_results = self.confluence.get_page_child_by_type(
-                page_id=page_id, type="page", start=start, limit=limit, expand=expand
-            )
-
-            # Handle both pagination modes for pages
-            if isinstance(page_results, dict) and "results" in page_results:
-                child_items = page_results.get("results", [])
+            v2_adapter = self._v2_adapter
+            if v2_adapter:
+                # The v1 content endpoints are being removed from the OAuth
+                # API gateway; list children via the v2 API instead.
+                expand_fields = {f.strip().split(".")[0] for f in expand.split(",")}
+                child_items = v2_adapter.get_page_children(
+                    page_id,
+                    start=start,
+                    limit=limit,
+                    include_folders=include_folders,
+                    include_version="version" in expand_fields,
+                    include_body="body" in expand_fields,
+                )
             else:
-                child_items = page_results or []
+                # First, get child pages
+                page_results = self.confluence.get_page_child_by_type(
+                    page_id=page_id,
+                    type="page",
+                    start=start,
+                    limit=limit,
+                    expand=expand,
+                )
 
-            # Also get child folders if requested
-            if include_folders:
+                # Handle both pagination modes for pages
+                if isinstance(page_results, dict) and "results" in page_results:
+                    child_items = page_results.get("results", [])
+                else:
+                    child_items = page_results or []
+
+            # Also get child folders if requested (the v2 call already did)
+            if include_folders and not v2_adapter:
                 try:
                     folder_results = self.confluence.get_page_child_by_type(
                         page_id=page_id,
@@ -831,10 +911,15 @@ class PagesMixin(ConfluenceClient):
 
             return page_models
 
+        except HTTPError:
+            raise  # let decorator handle auth errors
+        except ValueError:
+            raise  # v2 adapter errors already carry a client-safe message
         except Exception as e:
             logger.error(f"Error fetching child pages for page {page_id}: {str(e)}")
             logger.debug("Full exception details:", exc_info=True)
-            return []
+            msg = f"Error fetching child pages for page {page_id}: {str(e)}"
+            raise Exception(msg) from e
 
     @handle_auth_errors("Confluence API")
     def get_space_page_tree(
@@ -865,8 +950,14 @@ class PagesMixin(ConfluenceClient):
             - Note: parent_id is None for root pages
 
         Raises:
+            ValueError: If the space is listed in CONFLUENCE_SPACES_BLOCKED
             Exception: If there is an error fetching pages
         """
+        try:
+            check_confluence_space_access(self.config, space_key, write=False)
+        except ProjectAccessError as exc:
+            raise ValueError(str(exc)) from exc
+
         try:
             # Paginate using the raw API to access _links.next for reliable
             # truncation detection. The higher-level get_all_pages_from_space()
@@ -1030,10 +1121,14 @@ class PagesMixin(ConfluenceClient):
             ConfluencePage model containing the page history
 
         Raises:
+            ProjectAccessError: If the page's space is blocked, or cannot be
+                determined while CONFLUENCE_SPACES_BLOCKED is set
             MCPAtlassianAuthenticationError: If authentication
                 fails with the Confluence API (401/403)
             Exception: If there is an error getting page history
         """
+        self.check_content_access(page_id)
+
         try:
             v2_adapter = self._v2_adapter
             if v2_adapter:
@@ -1126,12 +1221,16 @@ class PagesMixin(ConfluenceClient):
         Raises:
             ValueError: If neither target_parent_id nor target_space_key
                 is provided.
+            ProjectAccessError: If the target's space is blocked, read-only,
+                or cannot be determined while a space list is set.
             MCPAtlassianAuthenticationError: If authentication fails.
         """
         if not target_parent_id and not target_space_key:
             raise ValueError(
                 "At least one of target_parent_id or target_space_key must be provided."
             )
+        if target_parent_id:
+            self.check_content_access(str(target_parent_id), write=True)
 
         try:
             # Use v2 adapter for OAuth authentication
@@ -1190,6 +1289,9 @@ class PagesMixin(ConfluenceClient):
             and diff string.
 
         Raises:
+            ProjectAccessError: If the page's space is blocked, or cannot be
+                determined while CONFLUENCE_SPACES_BLOCKED is set (checked by
+                get_page_history before each version is read).
             MCPAtlassianAuthenticationError: If authentication fails.
         """
         from_page = self.get_page_history(page_id=page_id, version=from_version)

@@ -67,11 +67,16 @@ Granular scopes are required for v2 API endpoints (`/api/v2/...`). Classic scope
 
 | Scope | Required by |
 |---|---|
-| `read:page:confluence` | `confluence_get_page` (v2 `/api/v2/pages/{id}`) |
+| `read:page:confluence` | `confluence_get_page` (v2 `/api/v2/pages/{id}`); version and body of child pages in `confluence_get_page_children` (v2 `/api/v2/pages`) |
+| `read:hierarchical-content:confluence` | `confluence_get_page_children` (v2 `/api/v2/pages/{id}/direct-children`, and `/api/v2/folders/{id}/direct-children` for a folder parent) |
 | `write:page:confluence` | `confluence_create_page`, `confluence_update_page` |
 | `read:space:confluence` | Space resolution in page tools |
-| `read:content:confluence` | Tools using v1 `/rest/api/content` (e.g. `confluence_get_page_children`) |
+| `read:content:confluence` | Tools using v1 `/rest/api/content` |
 | `write:content:confluence` | Write tools using v1 `/rest/api/content` |
+
+<Note>
+`confluence_get_page_children` now returns an `error` object when the lookup fails, for example `"Page not found or not accessible: <page_id>"` on a 404, or an authentication error on 401/403 (such as a missing `read:hierarchical-content:confluence` scope). Earlier versions returned `"count": 0` with an empty `results` list on any failure, which looked the same as a page with no children. The tool also returns an error, rather than a partial list, if it cannot reach the requested items within its request limit. If the server cannot read the space, it still lists the children, without the `space` field.
+</Note>
 
 Make sure `offline_access` is included in `ATLASSIAN_OAUTH_SCOPE` so the server can refresh tokens without requiring users to re-authenticate.
 
@@ -229,7 +234,7 @@ ENV ENABLED_TOOLS=confluence_add_comment,confluence_create_page,confluence_get_p
 ENV ATLASSIAN_OAUTH_CLIENT_ID=your_client_id
 ENV ATLASSIAN_OAUTH_CLOUD_ID=your_cloud_id
 ENV ATLASSIAN_OAUTH_REDIRECT_URI=https://your-prod-hostname/callback
-ENV ATLASSIAN_OAUTH_SCOPE="read:jira-work read:jira-user write:jira-work read:confluence-content.all write:confluence-content read:confluence-space.summary search:confluence read:page:confluence write:page:confluence read:space:confluence read:content:confluence write:content:confluence offline_access"
+ENV ATLASSIAN_OAUTH_SCOPE="read:jira-work read:jira-user write:jira-work read:confluence-content.all write:confluence-content read:confluence-space.summary search:confluence read:page:confluence write:page:confluence read:hierarchical-content:confluence read:space:confluence read:content:confluence write:content:confluence offline_access"
 
 ENV ATLASSIAN_OAUTH_PROXY_ENABLE=true
 ENV PUBLIC_BASE_URL=https://your-prod-hostname
