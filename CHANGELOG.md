@@ -7,6 +7,18 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+### Tests
+
+- Add HTTP-level tests for Confluence comment writes. Under Cloud OAuth,
+  `confluence_add_comment` and `confluence_reply_to_comment` post to the v2
+  `/api/v2/footer-comments` endpoint (`pageId` for a new comment,
+  `parentCommentId` for a reply, `storage` body). Server/Data Center
+  (including Data Center OAuth) and Cloud with an API token stay on v1
+  `/rest/api/content`. The tests also cover v2 response mapping, a v2 HTTP
+  error returned as JSON by the tool, and read-only mode blocking both tools
+  before any request (`tests/unit/confluence/test_comments_footer_v2.py`).
+  No runtime change: the v2 routing already shipped with upstream #1070.
+
 ## v0.21.2-peakflames.5
 
 ### Fixes
