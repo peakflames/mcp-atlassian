@@ -30,18 +30,26 @@ Running `uv sync --frozen --all-extras --dev` locally will **fail** with:
 ValueError: Version 'X.Y.ZpeakflamesN' does not conform to the PEP 440 style
 ```
 
-**Why:** `uv sync` without `--no-editable` triggers hatchling's editable install,
-which calls `uv-dynamic-versioning`. That tool reads the git tag, converts it to
-a version string, and rejects `vX.Y.Z-peakflames.N` because it is not PEP 440.
+**Why:** `uv sync` builds the project with hatchling, which calls
+`uv-dynamic-versioning`. That tool reads the git tag, converts it to a version
+string, and rejects `vX.Y.Z-peakflames.N` because it is not PEP 440. This happens
+with or without `--no-editable`; `--no-editable` alone does not fix it.
 
-**Fix — always add `--no-editable`:**
+**Fix — set `UV_DYNAMIC_VERSIONING_BYPASS`:**
 
-```bash
-uv sync --frozen --all-extras --dev --no-editable
+```powershell
+# PowerShell
+$env:UV_DYNAMIC_VERSIONING_BYPASS="0.21.2"; uv sync --frozen --all-extras --dev
 ```
 
-This matches exactly what the Dockerfile does and bypasses the hatchling editable
-build entirely. Note: with `--no-editable` you must re-run `uv sync` after editing
-source files to pick up changes (or use `uv run` which handles this automatically).
+```bash
+# bash
+UV_DYNAMIC_VERSIONING_BYPASS=0.21.2 uv sync --frozen --all-extras --dev
+```
 
-The Docker build is unaffected because both sync steps already use `--no-editable`.
+The bypass skips reading the git tag and uses the given version instead. Keep the
+value in step with the upstream base version (the `X.Y.Z` part of the current
+`vX.Y.Z-peakflames.N` tag).
+
+The Dockerfile uses `--no-editable` for its own image build; local development
+does not need it.
