@@ -238,6 +238,7 @@ class FakeConfluence:
                 200, {"id": m[1], "type": "folder", "spaceId": FOLDERS[m[1]][0]}
             )
         if (m := re.fullmatch(r"/api/v2/pages/(\d+)", path)) and m[1] in PAGES:
+            # ``?version=N`` returns the page as it was at version N.
             space_id, _ = PAGES[m[1]]
             return _response(
                 200,
@@ -246,7 +247,7 @@ class FakeConfluence:
                     "status": "current",
                     "title": f"Page {m[1]}",
                     "spaceId": space_id,
-                    "version": {"number": 1},
+                    "version": {"number": int(query.get("version", ["1"])[0])},
                     "body": {"storage": {"value": SECRET_BODY}},
                 },
             )
@@ -267,21 +268,6 @@ class FakeConfluence:
                             },
                         }
                     ]
-                },
-            )
-        if m := re.fullmatch(r"/api/v2/pages/(\d+)/versions", path):
-            versions = [{"id": f"{m[1]}v{n}", "number": n} for n in (1, 2)]
-            return _response(200, {"results": versions})
-        if m := re.fullmatch(r"/api/v2/versions/(\d+)v(\d+)", path):
-            return _response(
-                200,
-                {
-                    "id": m[1],
-                    "number": int(m[2]),
-                    "status": "current",
-                    "title": f"Page {m[1]}",
-                    "spaceId": PAGES[m[1]][0],
-                    "body": {"storage": {"value": SECRET_BODY}},
                 },
             )
         if m := re.fullmatch(r"/api/v2/pages/(\d+)/direct-children", path):
@@ -839,7 +825,8 @@ def _site_url(tool: str) -> str:
 def _is_content_lookup(path: str, query: dict[str, list[str]]) -> bool:
     """Whether a request is the access check reading a content item's space."""
     if re.fullmatch(r"/api/v2/(pages|blogposts|embeds|folders)/\d+", path):
-        return True
+        # A page read at a version is page history, not the access check.
+        return "version" not in query
     return bool(re.fullmatch(r"/rest/api/content/\d+", path)) and query.get(
         "expand"
     ) == ["space"]
@@ -909,13 +896,13 @@ async def test_page_read_tools_allowed_and_readonly_space_served(
 _HISTORY_V1 = ["/rest/api/content/100", "/rest/api/content/100/property"]
 
 
-def _history_v2(version: int) -> list[str]:
-    return [
-        "/api/v2/pages/100/versions",
-        f"/api/v2/versions/100v{version}",
-        "/api/v2/spaces/9001",  # space key of the returned version
-        "/api/v2/pages/100/properties",
-    ]
+_HISTORY_V2 = [
+    "/api/v2/pages/100",  # ?version=N, checked in V2_VERSION_READS
+    "/api/v2/spaces/9001",  # space key of the returned version
+    "/api/v2/pages/100/properties",
+]
+# The ``version`` sent with each v2 page read, in order.
+V2_VERSION_READS = {"get_page_history": ["1"], "get_page_diff": ["1", "2"]}
 
 
 # Requests each tool makes for page 100 when no block list is configured:
@@ -935,8 +922,8 @@ PAGE_READ_REQUESTS: dict[str, dict[str, list[str]]] = {
         ],
     },
     V2: {
-        "get_page_history": _history_v2(1),
-        "get_page_diff": _history_v2(1) + _history_v2(2),
+        "get_page_history": _HISTORY_V2,
+        "get_page_diff": _HISTORY_V2 + _HISTORY_V2,
         "get_page_views": [
             "/rest/api/content/100",  # page title (410 behind the gateway)
             "/rest/api/analytics/content/100/views",
@@ -960,6 +947,13 @@ async def test_page_read_tools_without_block_list_make_no_space_lookups(
     assert not any(_is_content_lookup(*request) for request in fake.requests)
     if tool in PAGE_READ_REQUESTS[mode]:
         assert fake.paths == PAGE_READ_REQUESTS[mode][tool]
+    if mode == V2 and tool in V2_VERSION_READS:
+        versions = [
+            query.get("version", [None])[0]
+            for path, query in fake.requests
+            if path == "/api/v2/pages/100"
+        ]
+        assert versions == V2_VERSION_READS[tool]
 
 
 @pytest.mark.usefixtures("http")

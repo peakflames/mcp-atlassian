@@ -775,11 +775,10 @@ class ConfluenceV2Adapter:
         version: int,
         expand: str | None = None,
     ) -> dict[str, Any]:
-        """Get a specific version of a page using the versions API.
+        """Get a specific version of a page using the v2 API.
 
-        Note: The v2 API uses version IDs, not version numbers. We need to:
-        1. List all versions to find the version ID for the given version number
-        2. Fetch the specific version using its version ID
+        Uses ``GET /api/v2/pages/{id}?version=N``, which returns the page as
+        it was at that version, including its body.
 
         Args:
             page_id: The ID of page
@@ -793,24 +792,8 @@ class ConfluenceV2Adapter:
             ValueError: If page retrieval fails or version not found
         """
         try:
-            # Step 1: Get all versions to find the version ID
-            versions_list = self.get_page_versions_list(page_id)
-
-            # Find the version with the matching version number
-            version_id = None
-            for ver in versions_list:
-                if ver.get("number") == version:
-                    version_id = ver.get("id")
-                    break
-
-            if not version_id:
-                raise ValueError(f"Version {version} not found for page '{page_id}'")
-
-            # Step 2: Fetch the specific version using its version ID
-            url = f"{self.base_url}/api/v2/versions/{version_id}"
-
-            # Convert v1 expand parameters to v2 format
-            params = {"body-format": "storage"}
+            url = f"{self.base_url}/api/v2/pages/{page_id}"
+            params = {"version": version, "body-format": "storage"}
 
             response = self.session.get(url, params=params)
             response.raise_for_status()
@@ -832,29 +815,12 @@ class ConfluenceV2Adapter:
                     "storage": {"value": storage_value, "representation": "storage"}
                 }
 
-            # Add version information from version response
-            # In versions API, version info is at the top level
-            if "number" in v2_response:
-                v1_compatible["version"] = {
-                    "number": v2_response.get("number"),
-                }
-            elif "version" in v2_response and "number" in v2_response["version"]:
-                v1_compatible["version"] = {
-                    "number": v2_response["version"].get("number"),
-                }
-
             # Add space information
             if space_id:
                 v1_compatible["space"] = {
                     "key": space_key,
                     "id": space_id,
                 }
-
-            # Add children.attachment for compatibility with v1 expand
-            if "children" in v2_response and "attachment" in v2_response["children"]:
-                v1_compatible.setdefault("children", {})["attachment"] = v2_response[
-                    "children"
-                ]["attachment"]
 
             return v1_compatible
 
