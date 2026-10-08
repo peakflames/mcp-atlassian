@@ -167,6 +167,9 @@ def _confluence_spec() -> _ServiceSpec:
         get_session=lambda f: f.confluence._session,
         validate_fn=lambda f: f.get_current_user_info(),
         on_validated=_confluence_on_validated,
+        # Space access lists are server policy and must apply to every
+        # request, whatever credentials it carries.
+        header_pat_global_fields=("spaces_blocked", "spaces_readonly"),
     )
 
 

@@ -45,6 +45,8 @@ class AttachmentsMixin(ConfluenceClient, AttachmentsOperationsProto):
             logger.error("No file path provided for attachment upload")
             return {"success": False, "error": "No file path provided"}
 
+        self.check_content_access(content_id, write=True)
+
         try:
             # Convert to absolute path if relative
             if not os.path.isabs(file_path):
@@ -356,10 +358,16 @@ class AttachmentsMixin(ConfluenceClient, AttachmentsOperationsProto):
 
         Returns:
             A dictionary with attachment information
+
+        Raises:
+            ProjectAccessError: If the content's space is blocked, or cannot
+                be determined while CONFLUENCE_SPACES_BLOCKED is set
         """
         if not content_id:
             logger.error("No content ID provided for getting attachments")
             return {"success": False, "error": "No content ID provided"}
+
+        self.check_content_access(content_id)
 
         try:
             logger.info(f"Fetching attachments for content {content_id}")
@@ -513,6 +521,8 @@ class AttachmentsMixin(ConfluenceClient, AttachmentsOperationsProto):
         if not attachment_id:
             logger.error("No attachment ID provided for deletion")
             return {"success": False, "error": "No attachment ID provided"}
+
+        self.check_content_access(attachment_id, write=True)
 
         try:
             logger.info(f"Deleting attachment {attachment_id}")

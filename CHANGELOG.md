@@ -9,18 +9,115 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ### Fixes
 
+- Fix `confluence_get_page_children` under Cloud OAuth: children are listed via
+  the v2 `/api/v2/pages/{id}/direct-children` endpoint (keeping `page` and,
+  with `include_folders`, `folder` items) instead of the v1
+  `/rest/api/content/{id}/child/{type}` endpoints, which the gateway is
+  removing (upstream issue #1598). A folder ID given as the parent is listed
+  via `/api/v2/folders/{id}/direct-children`. The list is read 250 items per
+  request, up to 20 requests; if that is not enough to reach `start + limit`
+  matching items, the tool returns an error instead of a partial list. When
+  `expand` includes `version` or `body`, child pages are looked up via
+  `/api/v2/pages?id=...`, 250 IDs per request. On this path `start`/`limit`
+  apply to pages and folders together, other `expand` fields are ignored,
+  and folders carry no version. Server/Data Center and
+  non-OAuth Cloud still use v1 (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/confluence/v2_adapter.py`). Requires the
+  `read:hierarchical-content:confluence` scope, plus `read:page:confluence`
+  for versions and content.
+- `confluence_get_page_children` no longer reports a failed lookup as an
+  empty list of children. The fetcher raises, and the tool returns an
+  `error` object (`Page not found or not accessible: <id>` on 404; error
+  text never includes the request URL); 401/403 is reported as an
+  authentication failure
+  (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/servers/confluence.py`).
+- `confluence_get_labels`, `confluence_get_attachments`,
+  `confluence_download_attachment`, `confluence_download_content_attachments`,
+  and `confluence_get_page_images` now enforce `CONFLUENCE_SPACES_BLOCKED`.
+  The content's space is checked before labels, attachment metadata, or file
+  contents are returned.
+- `confluence_get_comments` and `confluence_get_space_page_tree` now enforce
+  `CONFLUENCE_SPACES_BLOCKED`.
+- `confluence_get_page_children`, `confluence_get_page_history`,
+  `confluence_get_page_diff`, and `confluence_get_page_views` now enforce
+  `CONFLUENCE_SPACES_BLOCKED`. The space of the page (for
+  `confluence_get_page_children`, the parent page) is checked before child
+  pages, page versions, or view statistics are read, and the request is
+  denied when that space cannot be determined while a block list is set.
+- `confluence_add_label`, `confluence_upload_attachment`,
+  `confluence_upload_attachments`, and `confluence_delete_attachment` now
+  enforce `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY` for the
+  target content.
+- `confluence_reply_to_comment` now enforces `CONFLUENCE_SPACES_BLOCKED` and
+  `CONFLUENCE_SPACES_READONLY`, based on the space of the page or blog post
+  the comment belongs to.
+- Write tools that take a page ID (`confluence_update_page`,
+  `confluence_delete_page`, `confluence_move_page`, `confluence_add_comment`,
+  and `confluence_add_label`) now enforce `CONFLUENCE_SPACES_BLOCKED` and
+  `CONFLUENCE_SPACES_READONLY` for the page's space, and are denied when that
+  space cannot be determined while either list is set.
+- `confluence_create_page`, `confluence_update_page` (with `parent_id`), and
+  `confluence_move_page` (with `target_parent_id`) also check the parent's
+  space against `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY`,
+  and are denied when it cannot be determined while either list is set. A
+  folder as the parent resolves to the folder's space, including under Cloud
+  OAuth.
+- `confluence_get_page` now fails closed when a block list is set and the
+  page's space cannot be determined. When called with `title` and
+  `space_key`, it enforces `CONFLUENCE_SPACES_BLOCKED` for both the requested
+  space key and the space of the page that is returned.
+- Space keys are compared against `CONFLUENCE_SPACES_BLOCKED` and
+  `CONFLUENCE_SPACES_READONLY` ignoring case and surrounding whitespace, the
+  same way the lists themselves are read.
+- `CONFLUENCE_SPACES_BLOCKED` and `CONFLUENCE_SPACES_READONLY` now apply to
+  requests authenticated with the `X-Atlassian-Confluence-Url` and
+  `X-Atlassian-Confluence-Personal-Token` headers. The write-access check on
+  page-ID tools now also checks the server's lists directly.
 - `JIRA_PROJECTS_BLOCKED` and `JIRA_PROJECTS_READONLY` now apply to requests
   authenticated with the `X-Atlassian-Jira-Url` and
   `X-Atlassian-Jira-Personal-Token` headers, so `jira_get_issue` and
   `jira_search` honour them for those requests as they do for other
   credentials (`src/mcp_atlassian/servers/dependencies.py`).
 
+### Behaviour changes
+
+- Content-level writes (labels, attachments, comment replies) now also
+  enforce `CONFLUENCE_SPACES_READONLY` when only a read-only list is set.
+- Writes are denied when `CONFLUENCE_SPACES_READONLY` is set and the target's
+  space cannot be determined, even if no block list is set.
+
 ### Notes
 
+- With no space lists configured, these checks make no extra requests.
+- The space lists come from the server's own Confluence configuration. A
+  server with no global Confluence configuration, used only with
+  header-based credentials, has no lists to enforce.
+- With a block list set, a request is denied when the content's space cannot
+  be determined. The error names `CONFLUENCE_SPACES_BLOCKED`.
+- Under Cloud OAuth, the space check needs the `read:space:confluence` scope
+  plus read access to the content (page, blog post, folder, attachment, or
+  comment).
+  Without them, checked requests are denied while a relevant list is set.
+- Embed IDs passed to the label and attachment tools now return the
+  access-control error instead of a 404 when their space is blocked or cannot
+  be determined.
 - With no project lists configured, no extra requests are made.
 - The project lists come from the server's own Jira configuration. A server
   with no global Jira configuration, used only with header-based
   credentials, has no lists to enforce.
+
+### Tests
+
+- Add HTTP-level tests for Confluence comment writes. Under Cloud OAuth,
+  `confluence_add_comment` and `confluence_reply_to_comment` post to the v2
+  `/api/v2/footer-comments` endpoint (`pageId` for a new comment,
+  `parentCommentId` for a reply, `storage` body). Server/Data Center
+  (including Data Center OAuth) and Cloud with an API token stay on v1
+  `/rest/api/content`. The tests also cover v2 response mapping, a v2 HTTP
+  error returned as JSON by the tool, and read-only mode blocking both tools
+  before any request (`tests/unit/confluence/test_comments_footer_v2.py`).
+  No runtime change: the v2 routing already shipped with upstream #1070.
 
 ## v0.21.2-peakflames.5
 
