@@ -74,6 +74,11 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
   requests authenticated with the `X-Atlassian-Confluence-Url` and
   `X-Atlassian-Confluence-Personal-Token` headers. The write-access check on
   page-ID tools now also checks the server's lists directly.
+- `JIRA_PROJECTS_BLOCKED` and `JIRA_PROJECTS_READONLY` now apply to requests
+  authenticated with the `X-Atlassian-Jira-Url` and
+  `X-Atlassian-Jira-Personal-Token` headers, so `jira_get_issue` and
+  `jira_search` honour them for those requests as they do for other
+  credentials (`src/mcp_atlassian/servers/dependencies.py`).
 
 ### Behaviour changes
 
@@ -97,6 +102,10 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 - Embed IDs passed to the label and attachment tools now return the
   access-control error instead of a 404 when their space is blocked or cannot
   be determined.
+- With no project lists configured, no extra requests are made.
+- The project lists come from the server's own Jira configuration. A server
+  with no global Jira configuration, used only with header-based
+  credentials, has no lists to enforce.
 
 ### Tests
 

@@ -143,6 +143,9 @@ def _jira_spec() -> _ServiceSpec:
         get_session=lambda f: f.jira._session,
         validate_fn=lambda f: f.get_current_user_account_id(),
         on_validated=_jira_on_validated,
+        # Project access lists are server policy and must apply to every
+        # request, whatever credentials it carries.
+        header_pat_global_fields=("projects_blocked", "projects_readonly"),
     )
 
 
