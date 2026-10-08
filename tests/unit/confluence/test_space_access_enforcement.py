@@ -77,6 +77,8 @@ FOLDERS: dict[str, tuple[str, str]] = {
     "500": ("9002", "ENG"),
     "600": ("9001", "LEGAL"),
 }
+# folder id -> status the v2 folder lookup fails with
+FOLDER_ERRORS = {"8401": 401, "8403": 403, "8500": 500}
 # comment id -> page id
 COMMENTS = {f"1{page_id}": page_id for page_id in PAGES}
 # space key the title search is asked for -> page returned. ENGX stands in
@@ -212,6 +214,9 @@ class FakeConfluence:
                         return _response(403, {"message": "forbidden"})
                     return _response(200, {"id": space_id, "key": key})
             return _response(404)
+        folder = re.fullmatch(r"/api/v2/folders/(\d+)", path)
+        if folder and folder[1] in FOLDER_ERRORS:
+            return _response(FOLDER_ERRORS[folder[1]], {"message": "error"})
         if (m := re.fullmatch(r"/api/v2/folders/(\d+)", path)) and m[1] in FOLDERS:
             return _response(
                 200, {"id": m[1], "type": "folder", "spaceId": FOLDERS[m[1]][0]}
@@ -981,6 +986,33 @@ async def test_folder_parent_in_allowed_space_proceeds(
         # The fake's write response is minimal; only the access check matters.
         assert "CONFLUENCE_SPACES" not in str(exc)
     assert len(fake.writes) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("tool", list(PARENT_TOOLS))
+@pytest.mark.parametrize("folder_id", list(FOLDER_ERRORS))
+async def test_folder_lookup_error_denies_parent_write(
+    connect: Any, fake: FakeConfluence, tool: str, folder_id: str
+) -> None:
+    """A failed v2 folder lookup leaves the space unknown, so the write is denied."""
+    client = await connect(V2, blocked="LEGAL")
+    with pytest.raises(ToolError, match="CONFLUENCE_SPACES_BLOCKED is set"):
+        await client.call_tool(tool, PARENT_TOOLS[tool](folder_id))
+    assert f"/api/v2/folders/{folder_id}" in fake.paths
+    assert fake.writes == []
+
+
+@pytest.mark.usefixtures("http")
+@pytest.mark.parametrize("folder_id", list(FOLDER_ERRORS))
+def test_folder_lookup_error_denies_read_check(
+    fake: FakeConfluence, folder_id: str
+) -> None:
+    """The read check used before listing a folder's children fails closed."""
+    fetcher = _fetcher(V2, blocked="LEGAL")
+    with pytest.raises(ProjectAccessError, match="CONFLUENCE_SPACES_BLOCKED is set"):
+        fetcher.check_content_access(folder_id)
+    assert f"/api/v2/folders/{folder_id}" in fake.paths
+    assert fake.writes == []
 
 
 # ---------------------------------------------------------------------------
