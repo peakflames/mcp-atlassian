@@ -168,7 +168,7 @@ class CommentsMixin(ConfluenceClient):
                 )
                 space_key = ""
             else:
-                # v1 API: POST /rest/api/content/ with container type "comment"
+                # v1 API: POST /rest/api/content/
                 data: dict[str, Any] = {
                     "type": "comment",
                     "container": {
@@ -182,6 +182,12 @@ class CommentsMixin(ConfluenceClient):
                         },
                     },
                 }
+                if self.config.is_cloud:
+                    # On Cloud a comment container leaves the reply orphaned:
+                    # the container must be the page, with the parent comment
+                    # as the ancestor.
+                    data["container"] = self._comment_container(comment_id)
+                    data["ancestors"] = [{"id": comment_id}]
                 response = self.confluence.post("rest/api/content/", data=data)
                 space_key = ""
 
@@ -201,6 +207,30 @@ class CommentsMixin(ConfluenceClient):
             logger.error(f"Unexpected error replying to comment: {str(e)}")
             logger.debug("Full exception details for comment reply:", exc_info=True)
             return None
+
+    def _comment_container(self, comment_id: str) -> dict[str, str]:
+        """Return the page or blog post a comment belongs to, as a v1 container.
+
+        Args:
+            comment_id: The ID of the comment
+
+        Returns:
+            ``{"id": ..., "type": ...}`` for the comment's container
+
+        Raises:
+            ValueError: If the comment's container cannot be read
+        """
+        comment = self.confluence.get(
+            f"rest/api/content/{comment_id}", params={"expand": "container"}
+        )
+        container = comment.get("container") if isinstance(comment, dict) else None
+        if not isinstance(container, dict) or not container.get("id"):
+            msg = f"Cannot determine the page of comment {comment_id}"
+            raise ValueError(msg)
+        return {
+            "id": str(container["id"]),
+            "type": str(container.get("type") or "page"),
+        }
 
     def _process_comment_response(
         self, response: dict[str, Any], space_key: str
