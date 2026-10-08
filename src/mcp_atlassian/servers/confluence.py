@@ -315,7 +315,8 @@ async def get_page_children(
         include_folders: Whether to include child folders (default: True).
 
     Returns:
-        JSON string representing a list of child page and folder objects.
+        JSON string representing a list of child page and folder objects, or
+        an object with an "error" key if the children could not be retrieved.
     """
     confluence_fetcher = await get_confluence_fetcher(ctx)
     if include_content and "body" not in expand:
@@ -338,6 +339,17 @@ async def get_page_children(
             "start_requested": start,
             "results": child_pages,
         }
+    except MCPAtlassianAuthenticationError as e:
+        logger.error(f"Authentication error getting children of page {parent_id}: {e}")
+        result = {
+            "error": "Authentication failed. Please check your credentials.",
+            "details": str(e),
+        }
+    except ValueError as e:
+        logger.error(
+            f"Error getting children for page ID {parent_id}: {e}", exc_info=True
+        )
+        result = {"error": str(e), "parent_id": parent_id}
     except Exception as e:
         logger.error(
             f"Error getting/processing children for page ID {parent_id}: {e}",

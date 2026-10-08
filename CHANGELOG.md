@@ -7,6 +7,32 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+### Fixes
+
+- Fix `confluence_get_page_children` under Cloud OAuth: children are listed via
+  the v2 `/api/v2/pages/{id}/direct-children` endpoint (keeping `page` and,
+  with `include_folders`, `folder` items) instead of the v1
+  `/rest/api/content/{id}/child/{type}` endpoints, which the gateway is
+  removing (upstream issue #1598). A folder ID given as the parent is listed
+  via `/api/v2/folders/{id}/direct-children`. The list is read 250 items per
+  request, up to 20 requests; if that is not enough to reach `start + limit`
+  matching items, the tool returns an error instead of a partial list. When
+  `expand` includes `version` or `body`, child pages are looked up via
+  `/api/v2/pages?id=...`, 250 IDs per request. On this path `start`/`limit`
+  apply to pages and folders together, other `expand` fields are ignored,
+  and folders carry no version. Server/Data Center and
+  non-OAuth Cloud still use v1 (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/confluence/v2_adapter.py`). Requires the
+  `read:hierarchical-content:confluence` scope, plus `read:page:confluence`
+  for versions and content.
+- `confluence_get_page_children` no longer reports a failed lookup as an
+  empty list of children. The fetcher raises, and the tool returns an
+  `error` object (`Page not found or not accessible: <id>` on 404; error
+  text never includes the request URL); 401/403 is reported as an
+  authentication failure
+  (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/servers/confluence.py`).
+
 ### Tests
 
 - Add HTTP-level tests for Confluence comment writes. Under Cloud OAuth,
