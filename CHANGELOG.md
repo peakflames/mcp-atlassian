@@ -7,6 +7,8 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+## v0.21.2-peakflames.6
+
 ### Fixes
 
 - Fix `confluence_get_page_children` under Cloud OAuth: children are listed via
