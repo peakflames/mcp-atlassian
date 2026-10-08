@@ -38,8 +38,16 @@ def _response(status: int, payload: Any) -> requests.Response:
 
 
 class FakeConfluence:
-    def __init__(self, *, parent_container: dict[str, Any] | None) -> None:
+    def __init__(
+        self,
+        *,
+        parent_container: dict[str, Any] | None,
+        echo_ancestors: bool = True,
+        empty_reply: bool = False,
+    ) -> None:
         self.parent_container = parent_container
+        self.echo_ancestors = echo_ancestors
+        self.empty_reply = empty_reply
         self.calls: list[tuple[str, str, dict[str, list[str]], Any]] = []
 
     def __call__(self, method: str, url: str, **kwargs: Any) -> requests.Response:
@@ -58,6 +66,8 @@ class FakeConfluence:
                 comment["container"] = self.parent_container
             return _response(200, comment)
         if method == "POST" and path == "/rest/api/content":
+            if self.empty_reply:
+                return _response(200, {})
             reply: dict[str, Any] = {
                 "id": REPLY_ID,
                 "type": "comment",
@@ -67,7 +77,7 @@ class FakeConfluence:
                 "body": {"storage": {"value": "<p>reply</p>"}},
                 "version": {"number": 1},
             }
-            if body.get("ancestors"):
+            if body.get("ancestors") and self.echo_ancestors:
                 reply["ancestors"] = [
                     {"id": a["id"], "type": "comment"} for a in body["ancestors"]
                 ]
@@ -132,14 +142,51 @@ def test_cloud_reply_uses_page_container_and_parent_ancestor(
     assert reply.parent_comment_id == PARENT_ID
 
 
-def test_cloud_reply_without_readable_container_posts_nothing(http: Any) -> None:
-    fake = FakeConfluence(parent_container=None)
+@pytest.mark.parametrize(
+    "parent_container",
+    [
+        None,
+        # The parent is itself a reply left without a page (by the old v1
+        # request); posting under it would create another such reply.
+        {"id": "699", "type": "comment"},
+        {"id": PAGE_ID},
+        {"type": "page"},
+    ],
+    ids=["no-container", "comment-container", "missing-type", "missing-id"],
+)
+def test_cloud_reply_without_page_container_posts_nothing(
+    http: Any, parent_container: dict[str, Any] | None
+) -> None:
+    fake = FakeConfluence(parent_container=parent_container)
     http(fake)
 
     reply = _fetcher(CLOUD_URL).reply_to_comment(PARENT_ID, "<p>reply</p>")
 
     assert reply is None
     assert fake.posts() == []
+
+
+def test_cloud_reply_response_without_ancestors_keeps_parent(http: Any) -> None:
+    fake = FakeConfluence(
+        parent_container={"id": PAGE_ID, "type": "page"}, echo_ancestors=False
+    )
+    http(fake)
+
+    reply = _fetcher(CLOUD_URL).reply_to_comment(PARENT_ID, "<p>reply</p>")
+
+    assert reply is not None
+    assert reply.id == REPLY_ID
+    assert reply.parent_comment_id == PARENT_ID
+
+
+def test_cloud_reply_empty_response_returns_none(http: Any) -> None:
+    fake = FakeConfluence(
+        parent_container={"id": PAGE_ID, "type": "page"}, empty_reply=True
+    )
+    http(fake)
+
+    assert _fetcher(CLOUD_URL).reply_to_comment(PARENT_ID, "<p>reply</p>") is None
+    assert len(fake.posts()) == 1
 
 
 def test_server_reply_request_is_unchanged(http: Any) -> None:

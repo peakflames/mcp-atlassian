@@ -190,6 +190,17 @@ class CommentsMixin(ConfluenceClient):
                     data["ancestors"] = [{"id": comment_id}]
                 response = self.confluence.post("rest/api/content/", data=data)
                 space_key = ""
+                if (
+                    self.config.is_cloud
+                    and isinstance(response, dict)
+                    and response
+                    and not response.get("ancestors")
+                ):
+                    # The parent is known even when the response omits it.
+                    response = {
+                        **response,
+                        "ancestors": [{"id": comment_id, "type": "comment"}],
+                    }
 
             if not response:
                 logger.error("Failed to reply to comment: empty response")
@@ -218,19 +229,21 @@ class CommentsMixin(ConfluenceClient):
             ``{"id": ..., "type": ...}`` for the comment's container
 
         Raises:
-            ValueError: If the comment's container cannot be read
+            ValueError: If the comment's container is not a readable page or
+                blog post (for example a reply left without one)
         """
         comment = self.confluence.get(
             f"rest/api/content/{comment_id}", params={"expand": "container"}
         )
         container = comment.get("container") if isinstance(comment, dict) else None
-        if not isinstance(container, dict) or not container.get("id"):
+        if (
+            not isinstance(container, dict)
+            or not container.get("id")
+            or container.get("type") not in ("page", "blogpost")
+        ):
             msg = f"Cannot determine the page of comment {comment_id}"
             raise ValueError(msg)
-        return {
-            "id": str(container["id"]),
-            "type": str(container.get("type") or "page"),
-        }
+        return {"id": str(container["id"]), "type": str(container["type"])}
 
     def _process_comment_response(
         self, response: dict[str, Any], space_key: str
