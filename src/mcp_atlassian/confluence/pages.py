@@ -776,6 +776,7 @@ class PagesMixin(ConfluenceClient):
             logger.error(f"Error updating page {page_id}: {str(e)}")
             raise Exception(f"Failed to update page {page_id}: {str(e)}") from e
 
+    @handle_auth_errors("Confluence API")
     def get_page_children(
         self,
         page_id: str,
@@ -789,6 +790,12 @@ class PagesMixin(ConfluenceClient):
         """
         Get child pages and folders of a specific Confluence page.
 
+        Cloud OAuth uses the v2 ``direct-children`` endpoint; Server/Data
+        Center and non-OAuth Cloud use the v1 child endpoints. On the v2 path
+        ``expand`` is only checked for ``version`` and ``body`` (other expand
+        fields have no v2 equivalent here and are ignored), ``start``/``limit``
+        apply to pages and folders together, and folders carry no version.
+
         Args:
             page_id: The ID of the parent page
             start: The starting index for pagination
@@ -800,22 +807,46 @@ class PagesMixin(ConfluenceClient):
 
         Returns:
             List of ConfluencePage models containing the child pages and folders
+
+        Raises:
+            MCPAtlassianAuthenticationError: If authentication fails (401/403)
+            HTTPError: If the v1 API request fails with another HTTP error
+            ValueError: If the v2 API request fails or the listing would be
+                incomplete
+            Exception: If the child pages cannot be retrieved
         """
         try:
-            # Use the Atlassian Python API's get_page_child_by_type method
-            # First, get child pages
-            page_results = self.confluence.get_page_child_by_type(
-                page_id=page_id, type="page", start=start, limit=limit, expand=expand
-            )
-
-            # Handle both pagination modes for pages
-            if isinstance(page_results, dict) and "results" in page_results:
-                child_items = page_results.get("results", [])
+            v2_adapter = self._v2_adapter
+            if v2_adapter:
+                # The v1 content endpoints are being removed from the OAuth
+                # API gateway; list children via the v2 API instead.
+                expand_fields = {f.strip().split(".")[0] for f in expand.split(",")}
+                child_items = v2_adapter.get_page_children(
+                    page_id,
+                    start=start,
+                    limit=limit,
+                    include_folders=include_folders,
+                    include_version="version" in expand_fields,
+                    include_body="body" in expand_fields,
+                )
             else:
-                child_items = page_results or []
+                # First, get child pages
+                page_results = self.confluence.get_page_child_by_type(
+                    page_id=page_id,
+                    type="page",
+                    start=start,
+                    limit=limit,
+                    expand=expand,
+                )
 
-            # Also get child folders if requested
-            if include_folders:
+                # Handle both pagination modes for pages
+                if isinstance(page_results, dict) and "results" in page_results:
+                    child_items = page_results.get("results", [])
+                else:
+                    child_items = page_results or []
+
+            # Also get child folders if requested (the v2 call already did)
+            if include_folders and not v2_adapter:
                 try:
                     folder_results = self.confluence.get_page_child_by_type(
                         page_id=page_id,
@@ -876,10 +907,15 @@ class PagesMixin(ConfluenceClient):
 
             return page_models
 
+        except HTTPError:
+            raise  # let decorator handle auth errors
+        except ValueError:
+            raise  # v2 adapter errors already carry a client-safe message
         except Exception as e:
             logger.error(f"Error fetching child pages for page {page_id}: {str(e)}")
             logger.debug("Full exception details:", exc_info=True)
-            return []
+            msg = f"Error fetching child pages for page {page_id}: {str(e)}"
+            raise Exception(msg) from e
 
     @handle_auth_errors("Confluence API")
     def get_space_page_tree(

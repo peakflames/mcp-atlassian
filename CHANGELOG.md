@@ -9,6 +9,29 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ### Fixes
 
+- Fix `confluence_get_page_children` under Cloud OAuth: children are listed via
+  the v2 `/api/v2/pages/{id}/direct-children` endpoint (keeping `page` and,
+  with `include_folders`, `folder` items) instead of the v1
+  `/rest/api/content/{id}/child/{type}` endpoints, which the gateway is
+  removing (upstream issue #1598). A folder ID given as the parent is listed
+  via `/api/v2/folders/{id}/direct-children`. The list is read 250 items per
+  request, up to 20 requests; if that is not enough to reach `start + limit`
+  matching items, the tool returns an error instead of a partial list. When
+  `expand` includes `version` or `body`, child pages are looked up via
+  `/api/v2/pages?id=...`, 250 IDs per request. On this path `start`/`limit`
+  apply to pages and folders together, other `expand` fields are ignored,
+  and folders carry no version. Server/Data Center and
+  non-OAuth Cloud still use v1 (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/confluence/v2_adapter.py`). Requires the
+  `read:hierarchical-content:confluence` scope, plus `read:page:confluence`
+  for versions and content.
+- `confluence_get_page_children` no longer reports a failed lookup as an
+  empty list of children. The fetcher raises, and the tool returns an
+  `error` object (`Page not found or not accessible: <id>` on 404; error
+  text never includes the request URL); 401/403 is reported as an
+  authentication failure
+  (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/servers/confluence.py`).
 - `confluence_get_labels`, `confluence_get_attachments`,
   `confluence_download_attachment`, `confluence_download_content_attachments`,
   and `confluence_get_page_images` now enforce `CONFLUENCE_SPACES_BLOCKED`.
@@ -68,6 +91,18 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 - Embed IDs passed to the label and attachment tools now return the
   access-control error instead of a 404 when their space is blocked or cannot
   be determined.
+
+### Tests
+
+- Add HTTP-level tests for Confluence comment writes. Under Cloud OAuth,
+  `confluence_add_comment` and `confluence_reply_to_comment` post to the v2
+  `/api/v2/footer-comments` endpoint (`pageId` for a new comment,
+  `parentCommentId` for a reply, `storage` body). Server/Data Center
+  (including Data Center OAuth) and Cloud with an API token stay on v1
+  `/rest/api/content`. The tests also cover v2 response mapping, a v2 HTTP
+  error returned as JSON by the tool, and read-only mode blocking both tools
+  before any request (`tests/unit/confluence/test_comments_footer_v2.py`).
+  No runtime change: the v2 routing already shipped with upstream #1070.
 
 ## v0.21.2-peakflames.5
 
