@@ -78,8 +78,8 @@ def test_get_all_agile_boards_http_error(boards_mixin):
         response=MagicMock(content="API Error content")
     )
 
-    result = boards_mixin.get_all_agile_boards()
-    assert result == []
+    with pytest.raises(requests.HTTPError):
+        boards_mixin.get_all_agile_boards()
     boards_mixin.jira.get_all_agile_boards.assert_called_once()
 
 

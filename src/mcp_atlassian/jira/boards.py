@@ -48,8 +48,10 @@ class BoardsMixin(JiraClient):
             )
             return boards.get("values", []) if isinstance(boards, dict) else []
         except requests.HTTPError as e:
+            # Re-raise so auth failures (e.g. missing Jira Software OAuth scope)
+            # reach the caller instead of looking like an empty board list.
             logger.error(f"Error getting all agile boards: {str(e.response.content)}")
-            return []
+            raise
         except Exception as e:
             logger.error(f"Error getting all agile boards: {str(e)}")
             return []
