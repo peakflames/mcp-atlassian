@@ -1200,6 +1200,35 @@ class ConfluenceV2Adapter:
 
         return {"results": []}
 
+    def get_space_pages(
+        self, space_key: str, limit: int = 500
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """List pages in a space via the v2 API.
+
+        The v2 page listing omits the v1 ``extensions.position`` value and the
+        ``ancestors`` expansion, so callers must derive hierarchy from
+        ``parentId``.
+
+        Args:
+            space_key: The key of the space
+            limit: Maximum number of pages to return
+
+        Returns:
+            Tuple of (page objects truncated to ``limit``, whether more exist)
+
+        Raises:
+            ValueError: If the space is not found
+            HTTPError: If the page listing request fails
+        """
+        space_id = self._get_space_id(space_key)
+        url = f"{self.base_url}/api/v2/spaces/{space_id}/pages"
+
+        # Fetch one extra item so truncation is detectable without a second call.
+        page_size = 250
+        max_pages = -(-(limit + 1) // page_size)
+        results = self._get_all_results(url, limit=page_size, max_pages=max_pages)
+        return results[:limit], len(results) > limit
+
     def _get_all_results(
         self, url: str, limit: int = 250, max_pages: int = 20
     ) -> list[dict[str, Any]]:

@@ -285,3 +285,63 @@ class TestConfluenceV2AdapterComments:
         assert payload["pageId"] == "12345"
         assert "parentCommentId" not in payload
         assert result["id"] == "333444555"
+
+
+class TestGetSpacePages:
+    """Tests for ConfluenceV2Adapter.get_space_pages."""
+
+    @pytest.fixture
+    def mock_session(self):
+        """Create a mock session."""
+        return MagicMock(spec=requests.Session)
+
+    @pytest.fixture
+    def v2_adapter(self, mock_session):
+        """Create a ConfluenceV2Adapter instance."""
+        return ConfluenceV2Adapter(
+            session=mock_session, base_url="https://example.atlassian.net/wiki"
+        )
+
+    @staticmethod
+    def _response(payload: dict) -> MagicMock:
+        response = MagicMock()
+        response.json.return_value = payload
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_follows_cursor_pagination(self, v2_adapter, mock_session):
+        """Pages are collected across cursor-paginated responses."""
+        v2_adapter._get_space_id = MagicMock(return_value="999")
+        mock_session.get.side_effect = [
+            self._response(
+                {
+                    "results": [{"id": "1"}, {"id": "2"}],
+                    "_links": {
+                        "next": "/wiki/api/v2/spaces/999/pages?cursor=abc&limit=250"
+                    },
+                }
+            ),
+            self._response({"results": [{"id": "3"}]}),
+        ]
+
+        pages, has_more = v2_adapter.get_space_pages("TEST", limit=500)
+
+        assert [p["id"] for p in pages] == ["1", "2", "3"]
+        assert has_more is False
+        v2_adapter._get_space_id.assert_called_once_with("TEST")
+        assert (
+            mock_session.get.call_args_list[0].args[0]
+            == "https://example.atlassian.net/wiki/api/v2/spaces/999/pages"
+        )
+
+    def test_truncates_to_limit_and_reports_more(self, v2_adapter, mock_session):
+        """Results beyond limit are dropped and has_more is set."""
+        v2_adapter._get_space_id = MagicMock(return_value="999")
+        mock_session.get.return_value = self._response(
+            {"results": [{"id": str(i)} for i in range(5)]}
+        )
+
+        pages, has_more = v2_adapter.get_space_pages("TEST", limit=3)
+
+        assert [p["id"] for p in pages] == ["0", "1", "2"]
+        assert has_more is True

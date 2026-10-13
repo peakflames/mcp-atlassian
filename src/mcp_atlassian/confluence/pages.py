@@ -16,6 +16,7 @@ from ..utils.access_control import (
 from ..utils.decorators import handle_auth_errors
 from .client import ConfluenceClient
 from .utils import emoji_to_hex_id, extract_emoji_from_property
+from .v2_adapter import ConfluenceV2Adapter
 
 logger = logging.getLogger("mcp-atlassian")
 
@@ -921,6 +922,60 @@ class PagesMixin(ConfluenceClient):
             msg = f"Error fetching child pages for page {page_id}: {str(e)}"
             raise Exception(msg) from e
 
+    def _build_space_tree_from_v2(
+        self,
+        v2_adapter: ConfluenceV2Adapter,
+        space_key: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Build the space page tree from the v2 page listing.
+
+        ``position`` is always None on this path because the v2 listing does
+        not expose it. Pages are ordered by depth, then title.
+
+        Args:
+            v2_adapter: v2 API adapter for the current OAuth session
+            space_key: The key of the space
+            limit: Maximum number of pages to fetch
+
+        Returns:
+            Dictionary in the same shape as the v1 path (without ``next_start``,
+            since v2 uses cursors rather than offsets)
+        """
+        pages, has_more = v2_adapter.get_space_pages(space_key, limit=limit)
+        parent_by_id = {page.get("id"): page.get("parentId") for page in pages}
+
+        def depth_of(page_id: str | None) -> int:
+            # Count parent links up to the root. An unresolved parent (e.g. a
+            # folder, or a page beyond the truncation point) counts as one level.
+            depth = 0
+            seen = {page_id}
+            current = parent_by_id.get(page_id)
+            while current and current not in seen:
+                seen.add(current)
+                depth += 1
+                current = parent_by_id.get(current)
+            return depth
+
+        result_pages = [
+            {
+                "id": page.get("id"),
+                "title": page.get("title", "Untitled"),
+                "parent_id": page.get("parentId"),
+                "position": None,
+                "depth": depth_of(page.get("id")),
+            }
+            for page in pages
+        ]
+        result_pages.sort(key=lambda p: (p["depth"], p["title"]))
+
+        return {
+            "space_key": space_key,
+            "total_pages": len(result_pages),
+            "has_more": has_more,
+            "pages": result_pages,
+        }
+
     @handle_auth_errors("Confluence API")
     def get_space_page_tree(
         self,
@@ -957,6 +1012,11 @@ class PagesMixin(ConfluenceClient):
             check_confluence_space_access(self.config, space_key, write=False)
         except ProjectAccessError as exc:
             raise ValueError(str(exc)) from exc
+
+        # Cloud OAuth: the v1 listing returns 410 Gone, use the v2 API instead
+        v2_adapter = self._v2_adapter
+        if v2_adapter:
+            return self._build_space_tree_from_v2(v2_adapter, space_key, limit)
 
         try:
             # Paginate using the raw API to access _links.next for reliable
