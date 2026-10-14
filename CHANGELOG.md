@@ -7,6 +7,51 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+## v0.21.2-peakflames.7
+
+### Fixes
+
+- Fix `confluence_get_space_page_tree` under Cloud OAuth. The tree is read from
+  the v2 `/api/v2/spaces/{id}/pages` listing instead of the v1 space content
+  listing, which returns 410 Gone under OAuth. Hierarchy is derived from
+  `parentId`, so no per-page ancestor calls are made. The v2 listing has no
+  position field: `position` is `None` on this path and pages sort by depth,
+  then title. Non-OAuth paths are unchanged
+  (`src/mcp_atlassian/confluence/pages.py`).
+- Fix `confluence_get_page_history` and `confluence_get_page_diff` under Cloud
+  OAuth. Each version is read with
+  `GET /api/v2/pages/{id}?version=N&body-format=storage`. The previous lookup
+  through `/api/v2/pages/{id}/versions` and `/api/v2/versions/{id}` failed with
+  "Version N not found" on every call. An unknown version is a 404. The returned
+  dict keeps the v1-compatible shape
+  (`src/mcp_atlassian/confluence/pages.py`,
+  `src/mcp_atlassian/confluence/v2_adapter.py`).
+- Fix `confluence_reply_to_comment` under Cloud so replies appear on the page.
+  A v1 reply now names the parent comment's container, read with
+  `GET rest/api/content/{id}?expand=container`, as its container and the parent
+  comment as its only ancestor. If the parent's container cannot be read,
+  nothing is posted (`src/mcp_atlassian/confluence/comments.py`).
+- `confluence_reply_to_comment` under Cloud replies only under a page or blog
+  post container. A parent whose container is a comment previously received a
+  reply that Cloud left off the page while the tool reported success. That
+  reply now fails without posting.
+- Surface HTTP errors from the Jira agile board lookup. `get_all_agile_boards`
+  re-raises instead of returning `[]`, so an authentication error reaches the
+  caller (`src/mcp_atlassian/jira/boards.py`).
+
+### Behaviour changes
+
+- `get_all_agile_boards` raises HTTP errors on every auth type. Previously they
+  were returned as an empty board list. Under Cloud OAuth, a token without the
+  Jira Software scopes now gets the 401 as an error.
+
+### Tests
+
+- Add unit tests for the Cloud OAuth paths above in
+  `tests/unit/confluence/test_pages.py`, `test_page_version_v2.py`,
+  `test_comment_reply_v1.py`, `test_v2_adapter.py`, and
+  `tests/unit/jira/test_boards.py`.
+
 ## v0.21.2-peakflames.6
 
 ### Fixes
