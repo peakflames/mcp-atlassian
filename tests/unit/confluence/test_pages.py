@@ -1,6 +1,6 @@
 """Unit tests for the PagesMixin class."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -2993,3 +2993,117 @@ class TestPageHierarchy:
 
         result = pages_mixin.get_page_space_key("999")
         assert result is None
+
+
+class TestSpacePageTreeOAuthV2:
+    """get_space_page_tree on Cloud OAuth routes through the v2 adapter."""
+
+    @pytest.fixture
+    def pages_mixin(self, confluence_client):
+        """Create a PagesMixin instance for testing."""
+        with patch(
+            "mcp_atlassian.confluence.pages.ConfluenceClient.__init__"
+        ) as mock_init:
+            mock_init.return_value = None
+            mixin = PagesMixin()
+            mixin.confluence = confluence_client.confluence
+            mixin.config = confluence_client.config
+            yield mixin
+
+    @pytest.fixture
+    def v2_adapter(self):
+        """Mock v2 adapter whose page listing is set per test."""
+        return MagicMock()
+
+    @pytest.fixture
+    def use_v2(self, pages_mixin, v2_adapter):
+        """Force the v2 branch by stubbing the _v2_adapter property."""
+        with patch.object(
+            PagesMixin,
+            "_v2_adapter",
+            new_callable=PropertyMock,
+            return_value=v2_adapter,
+        ):
+            yield pages_mixin
+
+    def test_builds_hierarchy_from_parent_ids(self, use_v2, v2_adapter, pages_mixin):
+        """Depth and parent_id come from parentId; sort is depth then title."""
+        v2_adapter.get_space_pages.return_value = (
+            [
+                {"id": "3", "title": "Grandchild", "parentId": "2"},
+                {"id": "2", "title": "Child", "parentId": "1"},
+                {"id": "5", "title": "Another Root", "parentId": None},
+                {"id": "1", "title": "Root", "parentId": None},
+            ],
+            False,
+        )
+
+        result = pages_mixin.get_space_page_tree("TEST", limit=500)
+
+        v2_adapter.get_space_pages.assert_called_once_with("TEST", limit=500)
+        pages_mixin.confluence.get_all_pages_from_space_raw.assert_not_called()
+        assert result["space_key"] == "TEST"
+        assert result["total_pages"] == 4
+        assert result["has_more"] is False
+        assert "next_start" not in result
+        assert [(p["id"], p["depth"]) for p in result["pages"]] == [
+            ("5", 0),
+            ("1", 0),
+            ("2", 1),
+            ("3", 2),
+        ]
+        assert result["pages"][0]["parent_id"] is None
+        assert result["pages"][2]["parent_id"] == "1"
+        assert all(p["position"] is None for p in result["pages"])
+
+    def test_unresolved_parent_counts_as_one_level(self, use_v2, v2_adapter):
+        """A parent outside the fetched set (e.g. a folder) adds one level."""
+        v2_adapter.get_space_pages.return_value = (
+            [{"id": "9", "title": "Orphan", "parentId": "folder-1"}],
+            False,
+        )
+
+        result = use_v2.get_space_page_tree("TEST")
+
+        assert result["pages"][0]["depth"] == 1
+        assert result["pages"][0]["parent_id"] == "folder-1"
+
+    def test_cycle_terminates(self, use_v2, v2_adapter):
+        """Malformed parent cycles do not loop forever."""
+        v2_adapter.get_space_pages.return_value = (
+            [
+                {"id": "a", "title": "A", "parentId": "b"},
+                {"id": "b", "title": "B", "parentId": "a"},
+            ],
+            False,
+        )
+
+        result = use_v2.get_space_page_tree("TEST")
+
+        assert {p["id"] for p in result["pages"]} == {"a", "b"}
+        assert all(p["depth"] == 1 for p in result["pages"])
+
+    def test_has_more_propagates(self, use_v2, v2_adapter):
+        """Truncation from the adapter is reported as has_more."""
+        v2_adapter.get_space_pages.return_value = (
+            [{"id": "1", "title": "Root", "parentId": None}],
+            True,
+        )
+
+        result = use_v2.get_space_page_tree("TEST", limit=1)
+
+        assert result["has_more"] is True
+        assert result["total_pages"] == 1
+
+    def test_empty_space(self, use_v2, v2_adapter):
+        """An empty space returns an empty tree."""
+        v2_adapter.get_space_pages.return_value = ([], False)
+
+        result = use_v2.get_space_page_tree("EMPTY")
+
+        assert result == {
+            "space_key": "EMPTY",
+            "total_pages": 0,
+            "has_more": False,
+            "pages": [],
+        }

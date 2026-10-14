@@ -69,6 +69,12 @@ class ConfluenceComment(ApiModel, TimestampMixin):
             parent_comment_id = str(v2_parent)
         elif container and container.get("type") == "comment":
             parent_comment_id = str(container.get("id", ""))
+        elif (ancestors := data.get("ancestors")) and isinstance(ancestors, list):
+            # v1 on Cloud: a reply's container is the page and its parent
+            # comment is the last ancestor.
+            parent = ancestors[-1]
+            if isinstance(parent, dict) and parent.get("type") == "comment":
+                parent_comment_id = str(parent.get("id", ""))
 
         # Extract location from extensions (v1 API)
         location = data.get("extensions", {}).get("location")

@@ -91,6 +91,18 @@ V1_REPLY: dict[str, Any] = {
     "id": "801",
     "container": {"id": "700", "type": "comment", "title": "Re: Release notes"},
 }
+# On Cloud a v1 reply's container is the page and its parent is the ancestor.
+V1_CLOUD_REPLY: dict[str, Any] = {
+    **V1_COMMENT,
+    "id": "801",
+    "ancestors": [{"id": "700", "type": "comment"}],
+}
+# GET /rest/api/content/700?expand=container (the parent comment).
+V1_PARENT_COMMENT: dict[str, Any] = {
+    "id": "700",
+    "type": "comment",
+    "container": {"id": "123", "type": "page", "title": "Release notes"},
+}
 
 # (auth_type, is_cloud, site URL) combinations that must stay on v1.
 V1_DEPLOYMENTS = [
@@ -302,16 +314,35 @@ class TestOtherDeploymentsStayOnV1:
         is_cloud: bool,  # noqa: FBT001
         site_url: str,
     ) -> None:
-        http = _FakeHttp({("POST", "/rest/api/content"): (200, V1_REPLY)})
+        http = _FakeHttp(
+            {
+                ("GET", "/rest/api/content/700"): (200, V1_PARENT_COMMENT),
+                ("POST", "/rest/api/content"): (
+                    200,
+                    V1_CLOUD_REPLY if is_cloud else V1_REPLY,
+                ),
+            }
+        )
         fetcher = _fetcher(
             http, auth_type=auth_type, is_cloud=is_cloud, site_url=site_url
         )
 
         comment = fetcher.reply_to_comment("700", "<p>Agreed</p>")
 
+        assert all("/api/v2/" not in url for _, url, _ in http.calls)
         [(url, payload)] = http.posts()
         assert url == f"{site_url}/rest/api/content"
-        assert payload["container"] == {"id": "700", "type": "comment"}
+        gets = [url for method, url, _ in http.calls if method == "GET"]
+        if is_cloud:
+            # Cloud attaches a reply only with the page as its container and
+            # the parent comment as its ancestor.
+            assert gets == [f"{site_url}/rest/api/content/700?expand=container"]
+            assert payload["container"] == {"id": "123", "type": "page"}
+            assert payload["ancestors"] == [{"id": "700"}]
+        else:
+            assert gets == []
+            assert payload["container"] == {"id": "700", "type": "comment"}
+            assert "ancestors" not in payload
         assert payload["body"]["storage"]["representation"] == "storage"
         assert comment is not None
         assert comment.parent_comment_id == "700"
