@@ -99,3 +99,62 @@ def test_get_all_agile_boards_model(boards_mixin, mock_boards):
     assert result == [
         JiraBoard.from_api_response(value) for value in mock_boards["values"]
     ]
+
+
+class TestBoardIssueMoves:
+    """Moving issues between a board and its backlog."""
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("move_issues_to_board", "rest/agile/1.0/board/42/issue"),
+            ("move_issues_to_backlog", "rest/agile/1.0/backlog/42/issue"),
+        ],
+    )
+    def test_posts_issue_keys_and_reports_no_failures_on_204(
+        self, boards_mixin, method, path
+    ):
+        boards_mixin.jira.post.return_value = None  # 204 No Content
+
+        failed = getattr(boards_mixin, method)("42", ["TM-1", "TM-2"])
+
+        assert failed == []
+        boards_mixin.jira.post.assert_called_once_with(
+            path, data={"issues": ["TM-1", "TM-2"]}
+        )
+
+    def test_207_reports_only_failed_issues(self, boards_mixin):
+        boards_mixin.jira.post.return_value = {
+            "entries": [
+                {"issueId": 1, "issueKey": "TM-1", "status": 200},
+                {
+                    "issueId": 2,
+                    "issueKey": "TM-2",
+                    "status": 403,
+                    "errors": ["Issue is not in the backlog of this board"],
+                },
+            ]
+        }
+
+        failed = boards_mixin.move_issues_to_board("42", ["TM-1", "TM-2"])
+
+        assert failed == [
+            {
+                "issueKey": "TM-2",
+                "status": 403,
+                "errors": ["Issue is not in the backlog of this board"],
+            }
+        ]
+
+    @pytest.mark.parametrize("keys", [[], [f"TM-{i}" for i in range(51)]])
+    def test_rejects_empty_or_more_than_50_keys(self, boards_mixin, keys):
+        with pytest.raises(ValueError):
+            boards_mixin.move_issues_to_board("42", keys)
+        boards_mixin.jira.post.assert_not_called()
+
+    def test_http_error_is_raised(self, boards_mixin):
+        response = MagicMock(status_code=401)
+        boards_mixin.jira.post.side_effect = requests.HTTPError(response=response)
+
+        with pytest.raises(requests.HTTPError):
+            boards_mixin.move_issues_to_backlog("42", ["TM-1"])

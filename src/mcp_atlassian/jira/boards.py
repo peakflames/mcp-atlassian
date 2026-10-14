@@ -88,3 +88,72 @@ class BoardsMixin(JiraClient):
             limit=limit,
         )
         return [JiraBoard.from_api_response(board) for board in boards]
+
+    def move_issues_to_board(
+        self, board_id: str, issue_keys: list[str]
+    ) -> list[dict[str, Any]]:
+        """Move issues from a board's backlog onto the board.
+
+        On a Kanban board with the backlog enabled (including team-managed
+        Kanban) this transitions the issues to the board's first column.
+
+        Args:
+            board_id: The board ID
+            issue_keys: Issue keys to move, at most 50
+
+        Returns:
+            Per-issue failures reported by Jira (``issueKey``, ``status``,
+            ``errors``); empty when every issue moved
+
+        Raises:
+            ValueError: If no keys or more than 50 keys are given
+            requests.HTTPError: If the request fails
+        """
+        return self._post_board_issue_move(
+            f"rest/agile/1.0/board/{board_id}/issue", issue_keys
+        )
+
+    def move_issues_to_backlog(
+        self, board_id: str, issue_keys: list[str]
+    ) -> list[dict[str, Any]]:
+        """Move issues from a board back to that board's backlog.
+
+        On a board with sprints this removes the issues from their active and
+        future sprints.
+
+        Args:
+            board_id: The board ID
+            issue_keys: Issue keys to move, at most 50
+
+        Returns:
+            Per-issue failures reported by Jira (``issueKey``, ``status``,
+            ``errors``); empty when every issue moved
+
+        Raises:
+            ValueError: If no keys or more than 50 keys are given
+            requests.HTTPError: If the request fails
+        """
+        return self._post_board_issue_move(
+            f"rest/agile/1.0/backlog/{board_id}/issue", issue_keys
+        )
+
+    def _post_board_issue_move(
+        self, path: str, issue_keys: list[str]
+    ) -> list[dict[str, Any]]:
+        if not issue_keys:
+            raise ValueError("At least one issue key is required")
+        if len(issue_keys) > 50:
+            raise ValueError("At most 50 issues can be moved at once")
+        # 204 when every issue moved; 207 lists each issue's outcome.
+        result = self.jira.post(path, data={"issues": issue_keys})
+        entries = result.get("entries", []) if isinstance(result, dict) else []
+        return [
+            {
+                "issueKey": entry.get("issueKey") or entry.get("issueId"),
+                "status": entry.get("status"),
+                "errors": entry.get("errors", []),
+            }
+            for entry in entries
+            if isinstance(entry, dict)
+            and (int(entry.get("status") or 0) >= 400 or entry.get("errors"))
+        ]

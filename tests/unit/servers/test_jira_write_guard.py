@@ -133,6 +133,8 @@ def _make_server(config: JiraConfig) -> FastMCP:
         jira_tools.batch_create_issues,
         jira_tools.link_to_epic,
         jira_tools.add_issues_to_sprint,
+        jira_tools.move_issues_to_board,
+        jira_tools.move_issues_to_backlog,
         jira_tools.create_issue,
         jira_tools.update_issue,
         jira_tools.transition_issue,
@@ -423,6 +425,45 @@ async def test_update_form_answers_numeric_issue_id_denied():
         },
     )
     _assert_denied(fake, error, "Cannot determine the Jira project")
+
+
+BOARD_MOVES = [
+    ("move_issues_to_board", "/rest/agile/1.0/board/9/issue"),
+    ("move_issues_to_backlog", "/rest/agile/1.0/backlog/9/issue"),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool", "_path"), BOARD_MOVES, ids=[m[0] for m in BOARD_MOVES]
+)
+@pytest.mark.parametrize(
+    ("issue_keys", "match"),
+    [
+        (f"SAFE-1,{BLOCKED}-2", "blocked"),
+        (f"SAFE-1, {READONLY}-3", "read-only"),
+        ("SAFE-1,10001", "Cannot determine the Jira project"),
+    ],
+    ids=["blocked", "readonly", "numeric-id"],
+)
+async def test_board_moves_denied(tool, _path, issue_keys, match):
+    fake, _, error = await _call(
+        _make_config(), tool, {"board_id": "9", "issue_keys": issue_keys}
+    )
+    _assert_denied(fake, error, match)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("tool", "path"), BOARD_MOVES, ids=[m[0] for m in BOARD_MOVES])
+async def test_board_moves_allowed(tool, path):
+    fake, call_result, error = await _call(
+        _make_config(), tool, {"board_id": "9", "issue_keys": "SAFE-1, OTHER-2"}
+    )
+    assert error is None
+    assert fake.writes == [("POST", path, {"issues": ["SAFE-1", "OTHER-2"]})]
+    result = json.loads(call_result.content[0].text)
+    assert result["success"] is True
+    assert result["moved"] == ["SAFE-1", "OTHER-2"]
 
 
 # ---------------------------------------------------------------------------
