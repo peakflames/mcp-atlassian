@@ -345,3 +345,89 @@ class TestGetSpacePages:
 
         assert [p["id"] for p in pages] == ["0", "1", "2"]
         assert has_more is True
+
+
+class TestPageLookups:
+    """Tests for the v2 title lookup and ancestors."""
+
+    @pytest.fixture
+    def mock_session(self):
+        """Create a mock session."""
+        return MagicMock(spec=requests.Session)
+
+    @pytest.fixture
+    def v2_adapter(self, mock_session):
+        """Create a ConfluenceV2Adapter instance."""
+        return ConfluenceV2Adapter(
+            session=mock_session, base_url="https://example.atlassian.net/wiki"
+        )
+
+    @staticmethod
+    def _response(payload: dict) -> MagicMock:
+        response = MagicMock()
+        response.json.return_value = payload
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_get_page_by_title_filters_by_space_id_and_title(
+        self, v2_adapter, mock_session
+    ):
+        v2_adapter._get_space_id = MagicMock(return_value="999")
+        v2_adapter.get_page = MagicMock(return_value={"id": "42", "title": "Notes"})
+        mock_session.get.return_value = self._response({"results": [{"id": "42"}]})
+
+        page = v2_adapter.get_page_by_title("ENG", "Notes")
+
+        assert page == {"id": "42", "title": "Notes"}
+        mock_session.get.assert_called_once_with(
+            "https://example.atlassian.net/wiki/api/v2/pages",
+            params={"space-id": "999", "title": "Notes", "limit": 1},
+        )
+        v2_adapter.get_page.assert_called_once_with("42")
+
+    def test_get_page_by_title_returns_none_when_no_match(
+        self, v2_adapter, mock_session
+    ):
+        v2_adapter._get_space_id = MagicMock(return_value="999")
+        v2_adapter.get_page = MagicMock()
+        mock_session.get.return_value = self._response({"results": []})
+
+        assert v2_adapter.get_page_by_title("ENG", "Missing") is None
+        v2_adapter.get_page.assert_not_called()
+
+    def test_get_page_ancestors_returns_pages_root_first(
+        self, v2_adapter, mock_session
+    ):
+        v2_adapter._get_space_key_from_id = MagicMock(return_value="ENG")
+        mock_session.get.side_effect = [
+            self._response(
+                {
+                    "results": [
+                        {"id": "1", "type": "page"},
+                        {"id": "5", "type": "folder"},
+                        {"id": "2", "type": "page"},
+                    ]
+                }
+            ),
+            self._response(
+                {
+                    "results": [
+                        {"id": "2", "title": "Parent", "spaceId": "999"},
+                        {"id": "1", "title": "Root", "spaceId": "999"},
+                    ]
+                }
+            ),
+        ]
+
+        ancestors = v2_adapter.get_page_ancestors("3")
+
+        assert [(a["id"], a["title"]) for a in ancestors] == [
+            ("1", "Root"),
+            ("2", "Parent"),
+        ]
+        assert ancestors[0]["space"]["key"] == "ENG"
+        assert (
+            mock_session.get.call_args_list[0].args[0]
+            == "https://example.atlassian.net/wiki/api/v2/pages/3/ancestors"
+        )
+        v2_adapter._get_space_key_from_id.assert_called_once_with("999")

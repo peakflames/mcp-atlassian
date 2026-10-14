@@ -171,7 +171,12 @@ class PagesMixin(ConfluenceClient):
                 fails with the Confluence API (401/403)
         """
         try:
-            ancestors = self.confluence.get_page_ancestors(page_id)
+            v2_adapter = self._v2_adapter
+            if v2_adapter:
+                # The v1 ancestors expansion is not served under Cloud OAuth.
+                ancestors = v2_adapter.get_page_ancestors(page_id)
+            else:
+                ancestors = self.confluence.get_page_ancestors(page_id)
 
             ancestor_models = []
             for ancestor in ancestors:
@@ -432,10 +437,15 @@ class PagesMixin(ConfluenceClient):
             raise ValueError(str(exc)) from exc
 
         try:
-            # Directly try to find the page by title
-            page = self.confluence.get_page_by_title(
-                space=space_key, title=title, expand="body.storage,version,space"
-            )
+            v2_adapter = self._v2_adapter
+            if v2_adapter:
+                # The v1 content-by-title lookup returns 410 Gone under Cloud
+                # OAuth, which would read as "not found".
+                page = v2_adapter.get_page_by_title(space_key, title)
+            else:
+                page = self.confluence.get_page_by_title(
+                    space=space_key, title=title, expand="body.storage,version,space"
+                )
 
             if not page:
                 logger.warning(

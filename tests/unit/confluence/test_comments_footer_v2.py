@@ -269,6 +269,86 @@ class TestCloudOAuthUsesV2FooterComments:
         assert _fetcher(http).reply_to_comment("900", "text") is None
 
 
+class TestCloudOAuthListsV2FooterComments:
+    """``get_page_comments`` reads v2 footer comments and their replies."""
+
+    ROUTES: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {
+        ("GET", "/api/v2/pages/123/footer-comments"): (200, {"results": [V2_COMMENT]}),
+        ("GET", "/api/v2/footer-comments/900/children"): (
+            200,
+            {
+                "results": [
+                    {k: v for k, v in V2_REPLY.items() if k != "parentCommentId"}
+                ]
+            },
+        ),
+        ("GET", "/api/v2/footer-comments/901/children"): (200, {"results": []}),
+    }
+
+    def test_lists_comments_then_replies_with_parent(self) -> None:
+        http = _FakeHttp(dict(self.ROUTES))
+
+        comments = _fetcher(http).get_page_comments("123")
+
+        simplified = [c.to_simplified_dict() for c in comments]
+        assert [c["id"] for c in simplified] == ["900", "901"]
+        assert "parent_comment_id" not in simplified[0]
+        assert simplified[1]["parent_comment_id"] == "900"
+        assert simplified[0]["body"].strip() == "Looks **good**"
+        assert simplified[0]["created"]
+        assert all(c["location"] == "footer" for c in simplified)
+        assert {method for method, _, _ in http.calls} == {"GET"}
+        assert not any("/rest/api/" in url for _, url, _ in http.calls)
+        assert http.calls[0][2]["params"]["body-format"] == "storage"
+
+    def test_return_markdown_false_keeps_html(self) -> None:
+        http = _FakeHttp(dict(self.ROUTES))
+
+        comments = _fetcher(http).get_page_comments("123", return_markdown=False)
+
+        assert "<strong>good</strong>" in comments[0].body
+
+    def test_listing_error_is_raised_not_reported_as_empty(self) -> None:
+        http = _FakeHttp(
+            {("GET", "/api/v2/pages/123/footer-comments"): (410, {"message": "Gone"})}
+        )
+
+        with pytest.raises(requests.HTTPError):
+            _fetcher(http).get_page_comments("123")
+
+
+class TestCloudOAuthTitleLookupUsesV2:
+    def test_get_page_by_title_reads_v2_pages(self) -> None:
+        page = {
+            "id": "123",
+            "status": "current",
+            "title": "Release notes",
+            "spaceId": "77",
+            "version": {"number": 3},
+            "body": {"storage": {"value": "<p>Body</p>"}},
+        }
+        http = _FakeHttp(
+            {
+                ("GET", "/api/v2/spaces"): (200, {"results": [{"id": "77"}]}),
+                ("GET", "/api/v2/spaces/77"): (200, {"id": "77", "key": "ENG"}),
+                ("GET", "/api/v2/pages"): (200, {"results": [{"id": "123"}]}),
+                ("GET", "/api/v2/pages/123"): (200, page),
+                ("GET", "/api/v2/pages/123/properties"): (200, {"results": []}),
+            }
+        )
+
+        result = _fetcher(http).get_page_by_title("ENG", "Release notes")
+
+        assert result is not None
+        assert result.id == "123"
+        assert result.title == "Release notes"
+        # No v1 content-by-title lookup (GET /rest/api/content?title=...).
+        assert not any(
+            url.split("?", 1)[0].endswith("/rest/api/content")
+            for _, url, _ in http.calls
+        )
+
+
 class TestOtherDeploymentsStayOnV1:
     @pytest.mark.parametrize(("auth_type", "is_cloud", "site_url"), V1_DEPLOYMENTS)
     def test_add_comment_uses_v1_content_endpoint(
