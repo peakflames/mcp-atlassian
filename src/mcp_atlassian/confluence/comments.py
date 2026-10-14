@@ -31,8 +31,20 @@ class CommentsMixin(ConfluenceClient):
         Raises:
             ProjectAccessError: If the page's space is blocked, or cannot be
                 determined while CONFLUENCE_SPACES_BLOCKED is set
+            HTTPError: On Cloud OAuth, if the v2 comment listing fails
         """
         self.check_content_access(page_id)
+        v2_adapter = self._v2_adapter
+        if v2_adapter:
+            # The v1 child/comment listing returns 410 Gone under Cloud OAuth.
+            # Errors are raised so an unreadable listing is not reported as
+            # a page with no comments.
+            return [
+                self._process_comment_response(
+                    comment, space_key="", return_markdown=return_markdown
+                )
+                for comment in v2_adapter.get_footer_comments(page_id)
+            ]
         try:
             # Get page info to extract space details
             page = self.confluence.get_page_by_id(page_id=page_id, expand="space")
@@ -246,18 +258,23 @@ class CommentsMixin(ConfluenceClient):
         return {"id": str(container["id"]), "type": str(container["type"])}
 
     def _process_comment_response(
-        self, response: dict[str, Any], space_key: str
+        self,
+        response: dict[str, Any],
+        space_key: str,
+        *,
+        return_markdown: bool = True,
     ) -> ConfluenceComment:
         """Process a comment API response into a ConfluenceComment model.
 
         Args:
             response: Raw API response dict
             space_key: The space key for content processing
+            return_markdown: When True the body is markdown, otherwise HTML
 
         Returns:
             Processed ConfluenceComment instance
         """
-        _, processed_markdown = self.preprocessor.process_html_content(
+        processed_html, processed_markdown = self.preprocessor.process_html_content(
             response.get("body", {}).get("view", {}).get("value", ""),
             space_key=space_key,
             confluence_client=self.confluence,
@@ -269,7 +286,9 @@ class CommentsMixin(ConfluenceClient):
         if "view" not in modified_response["body"]:
             modified_response["body"]["view"] = {}
 
-        modified_response["body"]["view"]["value"] = processed_markdown
+        modified_response["body"]["view"]["value"] = (
+            processed_markdown if return_markdown else processed_html
+        )
 
         return ConfluenceComment.from_api_response(
             modified_response,

@@ -7,6 +7,33 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+## v0.21.2-peakflames.8
+
+### Fixes
+
+- Fix `confluence_get_comments` under Cloud OAuth. Comments are listed from
+  `GET /api/v2/pages/{id}/footer-comments`, with each comment's replies from
+  `GET /api/v2/footer-comments/{id}/children`, depth first. Replies carry
+  `parent_comment_id`. The v1 child comment listing returns 410 Gone under
+  OAuth, and every error was returned as an empty list; listing errors now
+  surface as tool errors (`src/mcp_atlassian/confluence/comments.py`,
+  `src/mcp_atlassian/confluence/v2_adapter.py`). The listing needs the
+  `read:comment:confluence` scope.
+- v2 comments carry timestamps: `updated` is the version's `createdAt`, and
+  `created` is set for comments at version 1.
+- Fix `confluence_get_page` by `title` and `space_key` under Cloud OAuth. The
+  page is found with `GET /api/v2/pages?space-id=&title=` instead of the v1
+  content lookup, which returns 410 Gone and was reported as "not found"
+  (`src/mcp_atlassian/confluence/pages.py`).
+- Page ancestors are read with `GET /api/v2/pages/{id}/ancestors` under Cloud
+  OAuth, root first as before. Folders are skipped. The endpoint needs the
+  `read:content.metadata:confluence` scope; no tool calls this method today.
+- `confluence_get_page_views` returns an error when the analytics request
+  fails, instead of reporting 0 views. Authentication errors still propagate.
+  Under Cloud OAuth the page title is read through the v2 API. The analytics
+  endpoint needs the classic `read:confluence-content.summary` scope
+  (`src/mcp_atlassian/confluence/analytics.py`).
+
 ## v0.21.2-peakflames.7
 
 ### Fixes

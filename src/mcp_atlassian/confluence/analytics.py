@@ -25,7 +25,7 @@ class AnalyticsMixin:
     This mixin requires the class to have:
     - self.confluence: Atlassian Confluence client
     - self.config: ConfluenceConfig instance
-    - self.v2_adapter: Optional ConfluenceV2Adapter for OAuth
+    - self._v2_adapter: Optional ConfluenceV2Adapter for OAuth (title lookup)
     - self.check_content_access: Per-space access check (ConfluenceClient)
     """
 
@@ -33,7 +33,6 @@ class AnalyticsMixin:
     # annotations only: defining them here would shadow the base class.
     confluence: Any
     config: Any
-    v2_adapter: Any
     check_content_access: Callable[..., None]
 
     def get_page_views(
@@ -70,17 +69,20 @@ class AnalyticsMixin:
         page_title = None
         if include_title:
             try:
-                page_info = self.confluence.get_page_by_id(page_id, expand="title")
+                # The v1 content lookup is not served under Cloud OAuth.
+                v2_adapter = getattr(self, "_v2_adapter", None)
+                if v2_adapter:
+                    page_info = v2_adapter.get_page_titles([page_id]).get(page_id, {})
+                else:
+                    page_info = self.confluence.get_page_by_id(page_id, expand="title")
                 page_title = page_info.get("title")
             except Exception as e:
                 logger.warning(f"Could not fetch title for page {page_id}: {e}")
 
-        # Get view statistics using v2 adapter or direct API
+        # The analytics endpoint has no v2 equivalent; it is served on the
+        # client base URL (the API gateway under Cloud OAuth).
         try:
-            if hasattr(self, "v2_adapter") and self.v2_adapter:
-                views_data = self.v2_adapter.get_page_views(page_id)
-            else:
-                views_data = self._get_page_views_direct(page_id)
+            views_data = self._get_page_views_direct(page_id)
 
             # Parse the response
             total_views = views_data.get("count", 0)
@@ -108,20 +110,12 @@ class AnalyticsMixin:
             # Propagate auth errors
             if e.response is not None and e.response.status_code in [401, 403]:
                 raise
-            logger.warning(f"Failed to get views for page {page_id}: {e}")
-            # Return zero views on error (non-auth)
-            return PageViews(
-                page_id=page_id,
-                page_title=page_title,
-                total_views=0,
-            )
+            # A failed request is not a page with zero views.
+            raise ValueError(f"Failed to get views for page {page_id}: {e}") from e
         except Exception as e:
-            logger.warning(f"Unexpected error getting views for page {page_id}: {e}")
-            return PageViews(
-                page_id=page_id,
-                page_title=page_title,
-                total_views=0,
-            )
+            raise ValueError(
+                f"Unexpected error getting views for page {page_id}: {e}"
+            ) from e
 
     def _get_page_views_direct(
         self,

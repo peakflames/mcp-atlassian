@@ -925,7 +925,7 @@ PAGE_READ_REQUESTS: dict[str, dict[str, list[str]]] = {
         "get_page_history": _HISTORY_V2,
         "get_page_diff": _HISTORY_V2 + _HISTORY_V2,
         "get_page_views": [
-            "/rest/api/content/100",  # page title (410 behind the gateway)
+            "/api/v2/pages",  # page title, by ?id=
             "/rest/api/analytics/content/100/views",
         ],
     },

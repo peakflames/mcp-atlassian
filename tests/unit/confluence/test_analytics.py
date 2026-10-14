@@ -26,7 +26,7 @@ class TestAnalyticsMixin:
         mixin = MagicMock(spec=AnalyticsMixin)
         mixin.config = mock_config
         mixin.confluence = MagicMock()
-        mixin.v2_adapter = None
+        mixin._v2_adapter = None
         # Provided by ConfluenceClient in the real fetcher; space access
         # control is covered in test_space_access_enforcement.py.
         mixin.check_content_access = MagicMock()
@@ -107,7 +107,7 @@ class TestAnalyticsMixin:
         analytics_mixin.confluence.get_page_by_id.assert_not_called()
 
     def test_get_page_views_http_error_non_auth(self, analytics_mixin):
-        """Test that non-auth HTTP errors return zero views."""
+        """A non-auth HTTP error is raised, not reported as zero views."""
         analytics_mixin.confluence.get_page_by_id.return_value = {"title": "Test Page"}
 
         # Create HTTPError with 404 status
@@ -116,9 +116,26 @@ class TestAnalyticsMixin:
         http_error = HTTPError(response=mock_response)
         analytics_mixin.confluence._session.get.side_effect = http_error
 
+        with pytest.raises(ValueError, match="Failed to get views for page 123456"):
+            analytics_mixin.get_page_views("123456")
+
+    def test_get_page_views_oauth_title_from_v2(self, analytics_mixin):
+        """Under Cloud OAuth the title comes from the v2 page lookup."""
+        v2_adapter = MagicMock()
+        v2_adapter.get_page_titles.return_value = {
+            "123456": {"id": "123456", "title": "V2 Title"}
+        }
+        analytics_mixin._v2_adapter = v2_adapter
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"count": 19}
+        analytics_mixin.confluence._session.get.return_value = mock_response
+
         result = analytics_mixin.get_page_views("123456")
 
-        assert result.total_views == 0
+        assert result.page_title == "V2 Title"
+        assert result.total_views == 19
+        v2_adapter.get_page_titles.assert_called_once_with(["123456"])
+        analytics_mixin.confluence.get_page_by_id.assert_not_called()
 
     def test_get_page_views_http_error_auth_propagated(self, analytics_mixin):
         """Test that auth errors (401/403) are propagated."""
@@ -172,11 +189,10 @@ class TestAnalyticsMixin:
             ["111", "222", "333"], include_title=False
         )
 
-        # Non-auth errors should return zero views, not be counted as errors
+        # A non-auth error is counted as an error, not as zero views
         assert result.total_count == 3
-        # Page 222 returns 0 views instead of error
-        assert result.success_count == 3
-        assert result.error_count == 0
+        assert result.success_count == 2
+        assert result.error_count == 1
 
     def test_no_double_wiki_prefix_in_direct_api(self, analytics_mixin):
         """Regression: _get_page_views_direct must not duplicate /wiki (#962)."""

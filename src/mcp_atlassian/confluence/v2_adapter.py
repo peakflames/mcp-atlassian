@@ -334,6 +334,67 @@ class ConfluenceV2Adapter:
                 logger.error(f"Error getting page '{page_id}': {e}")
             raise ValueError(f"Failed to get page '{page_id}': {e}") from e
 
+    def get_page_by_title(self, space_key: str, title: str) -> dict[str, Any] | None:
+        """Find a current page by exact title in a space using the v2 API.
+
+        Args:
+            space_key: The key of the space
+            title: The exact page title
+
+        Returns:
+            The page in the v1-compatible format of ``get_page``, or None if no
+            page in the space has that title
+
+        Raises:
+            ValueError: If the space is not found or a request fails
+        """
+        space_id = self._get_space_id(space_key)
+        response = self.session.get(
+            f"{self.base_url}/api/v2/pages",
+            params={"space-id": space_id, "title": title, "limit": 1},
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        if not results:
+            return None
+        return self.get_page(str(results[0]["id"]))
+
+    def get_page_ancestors(self, page_id: str) -> list[dict[str, Any]]:
+        """Get a page's ancestor pages using the v2 API.
+
+        Folders and other non-page ancestors are skipped.
+
+        Args:
+            page_id: The ID of the page
+
+        Returns:
+            Ancestor pages in v1-compatible format, root first, as in the v1
+            ``ancestors`` expansion
+
+        Raises:
+            HTTPError: If a request fails
+        """
+        ancestors = self._get_all_results(
+            f"{self.base_url}/api/v2/pages/{page_id}/ancestors"
+        )
+        page_ids = [
+            str(a["id"]) for a in ancestors if a.get("id") and a.get("type") == "page"
+        ]
+        details = self._get_pages_by_id(page_ids, include_body=False)
+        space_keys: dict[str, str] = {}
+        result = []
+        for ancestor_id in page_ids:
+            page = details.get(ancestor_id)
+            if not page:
+                continue
+            space_id = str(page.get("spaceId") or "")
+            if space_id and space_id not in space_keys:
+                space_keys[space_id] = self._get_space_key_from_id(space_id)
+            result.append(
+                self._convert_v2_to_v1_format(page, space_keys.get(space_id, ""))
+            )
+        return result
+
     def delete_page(self, page_id: str) -> bool:
         """Delete a page using the v2 API.
 
@@ -473,6 +534,48 @@ class ConfluenceV2Adapter:
             logger.error(f"Error creating footer comment: {e}")
             raise ValueError(f"Failed to create footer comment: {e}") from e
 
+    def get_footer_comments(
+        self, page_id: str, max_replies_depth: int = 10
+    ) -> list[dict[str, Any]]:
+        """List a page's footer comments and their replies using the v2 API.
+
+        Each top-level comment is followed by its replies, depth first, in
+        the order the API returns them. Replies carry ``parentCommentId``.
+
+        Args:
+            page_id: The page ID
+            max_replies_depth: Safety cap on reply nesting
+
+        Returns:
+            Comments in v1-compatible format
+
+        Raises:
+            HTTPError: If any listing request fails
+        """
+        params = {"body-format": "storage"}
+
+        def with_replies(comment: dict[str, Any], depth: int) -> list[dict[str, Any]]:
+            items = [self._convert_v2_comment_to_v1_format(comment)]
+            if depth >= max_replies_depth or not comment.get("id"):
+                return items
+            children = self._get_all_results(
+                f"{self.base_url}/api/v2/footer-comments/{comment['id']}/children",
+                extra_params=params,
+            )
+            for child in children:
+                child.setdefault("parentCommentId", comment["id"])
+                items.extend(with_replies(child, depth + 1))
+            return items
+
+        top_level = self._get_all_results(
+            f"{self.base_url}/api/v2/pages/{page_id}/footer-comments",
+            extra_params=params,
+        )
+        comments: list[dict[str, Any]] = []
+        for comment in top_level:
+            comments.extend(with_replies(comment, 0))
+        return comments
+
     def _convert_v2_comment_to_v1_format(
         self, v2_response: dict[str, Any]
     ) -> dict[str, Any]:
@@ -503,6 +606,14 @@ class ConfluenceV2Adapter:
             "version": v2_response.get("version", {}),
             "_links": v2_response.get("_links", {}),
         }
+
+        # v2 has no top-level timestamps; the version timestamp is the last
+        # edit, and for version 1 it is also the creation time.
+        version = v2_response.get("version") or {}
+        if created_at := version.get("createdAt"):
+            v1_compatible["updated"] = created_at
+            if version.get("number") == 1:
+                v1_compatible["created"] = created_at
 
         # Map v2 author to v1 format
         if author := v2_response.get("author"):
@@ -1196,7 +1307,11 @@ class ConfluenceV2Adapter:
         return results[:limit], len(results) > limit
 
     def _get_all_results(
-        self, url: str, limit: int = 250, max_pages: int = 20
+        self,
+        url: str,
+        limit: int = 250,
+        max_pages: int = 20,
+        extra_params: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Collect ``results`` from a cursor-paginated v2 list endpoint.
 
@@ -1204,6 +1319,7 @@ class ConfluenceV2Adapter:
             url: The v2 list endpoint URL
             limit: Page size to request
             max_pages: Safety cap on the number of pages fetched
+            extra_params: Query parameters sent with every page request
 
         Returns:
             Combined list of result objects
@@ -1212,7 +1328,8 @@ class ConfluenceV2Adapter:
             HTTPError: If any request fails
         """
         results: list[dict[str, Any]] = []
-        params: dict[str, Any] = {"limit": limit}
+        base_params: dict[str, Any] = {**(extra_params or {}), "limit": limit}
+        params: dict[str, Any] = dict(base_params)
         for _ in range(max_pages):
             response = self.session.get(url, params=params)
             response.raise_for_status()
@@ -1226,7 +1343,7 @@ class ConfluenceV2Adapter:
             cursor = query.get("cursor", [None])[0]
             if not cursor:
                 break
-            params = {"limit": limit, "cursor": cursor}
+            params = {**base_params, "cursor": cursor}
         else:
             logger.warning(
                 f"Stopped after {max_pages} pages ({len(results)} results) from "
@@ -1424,6 +1541,25 @@ class ConfluenceV2Adapter:
             f"finding {start + limit} matching items"
         )
         raise ChildListTruncatedError(msg)
+
+    def get_page_titles(self, page_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Look up page titles without the body or a space lookup.
+
+        Args:
+            page_ids: Page IDs to look up
+
+        Returns:
+            Mapping of page ID to ``{"id": ..., "title": ...}``
+
+        Raises:
+            HTTPError: If a request fails
+        """
+        return {
+            page_id: {"id": page_id, "title": page.get("title")}
+            for page_id, page in self._get_pages_by_id(
+                page_ids, include_body=False
+            ).items()
+        }
 
     def _get_pages_by_id(
         self, page_ids: list[str], *, include_body: bool
