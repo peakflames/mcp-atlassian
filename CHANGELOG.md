@@ -7,6 +7,21 @@ Upstream history is tracked separately in `sooperset/mcp-atlassian`.
 
 ## Unreleased
 
+## v0.21.2-peakflames.9
+
+### Features
+
+- Add `jira_move_issues_to_board` and `jira_move_issues_to_backlog`. They move
+  up to 50 issues from a board's backlog onto the board
+  (`POST /rest/agile/1.0/board/{id}/issue`) and back
+  (`POST /rest/agile/1.0/backlog/{id}/issue`). On a team-managed Kanban board
+  with the backlog enabled, an issue created through the API lands in the
+  backlog, and no tool could put it on the board before. Both report the moved
+  issues and any per-issue failures; HTTP errors are raised. `issue_keys` goes
+  through the per-project write guard. Under OAuth both need
+  `write:board-scope:jira-software` (`src/mcp_atlassian/jira/boards.py`).
+  On a team-managed board the move does not change the issue's status.
+
 ## v0.21.2-peakflames.8
 
 ### Fixes

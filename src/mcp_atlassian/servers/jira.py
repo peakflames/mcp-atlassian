@@ -2395,6 +2395,102 @@ async def add_issues_to_sprint(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+def _board_move_result(
+    action: str, board_id: str, keys_list: list[str], failed: list[dict[str, Any]]
+) -> str:
+    failed_keys = {str(f.get("issueKey")) for f in failed}
+    moved = [k for k in keys_list if k not in failed_keys]
+    result: dict[str, Any] = {
+        "success": not failed,
+        "message": f"Moved {len(moved)} of {len(keys_list)} issue(s) {action}",
+        "board_id": board_id,
+        "moved": moved,
+    }
+    if failed:
+        result["failed"] = failed
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@jira_mcp.tool(
+    tags={"jira", "write", "toolset:jira_agile"},
+    annotations={"title": "Move Issues to Board", "readOnlyHint": False},
+)
+@check_write_access
+async def move_issues_to_board(
+    ctx: Context,
+    board_id: Annotated[str, Field(description="The id of the board (e.g., '1001')")],
+    issue_keys: Annotated[
+        str,
+        Field(
+            description=(
+                "Comma-separated issue keys in the board's backlog "
+                "(e.g., 'PROJ-1,PROJ-2'), at most 50"
+            )
+        ),
+    ],
+) -> str:
+    """Move issues from a board's backlog onto the board.
+
+    For a Kanban board with the backlog enabled, including team-managed
+    Kanban, the issues move to the board's first column.
+
+    Args:
+        ctx: The FastMCP context.
+        board_id: The ID of the board.
+        issue_keys: Comma-separated issue keys.
+
+    Returns:
+        JSON string with the moved issues and any per-issue failures.
+
+    Raises:
+        ValueError: If in read-only mode, Jira client unavailable, or invalid input.
+    """
+    jira = await get_jira_fetcher(ctx)
+    keys_list = [k.strip() for k in issue_keys.split(",") if k.strip()]
+    failed = jira.move_issues_to_board(board_id, keys_list)
+    return _board_move_result("to the board", board_id, keys_list, failed)
+
+
+@jira_mcp.tool(
+    tags={"jira", "write", "toolset:jira_agile"},
+    annotations={"title": "Move Issues to Backlog", "readOnlyHint": False},
+)
+@check_write_access
+async def move_issues_to_backlog(
+    ctx: Context,
+    board_id: Annotated[str, Field(description="The id of the board (e.g., '1001')")],
+    issue_keys: Annotated[
+        str,
+        Field(
+            description=(
+                "Comma-separated issue keys on the board "
+                "(e.g., 'PROJ-1,PROJ-2'), at most 50"
+            )
+        ),
+    ],
+) -> str:
+    """Move issues from a board back to that board's backlog.
+
+    On a board with sprints this removes the issues from their active and
+    future sprints.
+
+    Args:
+        ctx: The FastMCP context.
+        board_id: The ID of the board.
+        issue_keys: Comma-separated issue keys.
+
+    Returns:
+        JSON string with the moved issues and any per-issue failures.
+
+    Raises:
+        ValueError: If in read-only mode, Jira client unavailable, or invalid input.
+    """
+    jira = await get_jira_fetcher(ctx)
+    keys_list = [k.strip() for k in issue_keys.split(",") if k.strip()]
+    failed = jira.move_issues_to_backlog(board_id, keys_list)
+    return _board_move_result("to the backlog", board_id, keys_list, failed)
+
+
 @jira_mcp.tool(
     tags={"jira", "read", "toolset:jira_projects"},
     annotations={"title": "Get Project Versions", "readOnlyHint": True},
