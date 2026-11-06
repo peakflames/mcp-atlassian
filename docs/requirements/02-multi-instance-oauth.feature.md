@@ -9,13 +9,6 @@ Feature: 2.0 Multi-Instance OAuth Cloud-Site Resolution
 # --------------------------------------------------------------------------------------------------
 
 Scenario: [TOR-02-s6Jze5H] The _get_cloud_id() method shall resolve to the accessible-resource matching a configured ATLASSIAN_OAUTH_CLOUD_ID, regardless of the resource's position in the accessible-resources list
-    #
-    # Note:
-    #   1. Root cause: src/mcp_atlassian/utils/oauth.py line 328 currently reads
-    #      `self.cloud_id = resources[0]["id"]` unconditionally, ignoring any configured
-    #      cloud ID. The fix must search `resources` for an entry matching the configured
-    #      id before falling back to index 0.
-    #
     Given an OAuth token whose accessible-resources response is [{"id": "partner-site-id"}, {"id": "required-site-id"}]
     And ATLASSIAN_OAUTH_CLOUD_ID is configured as "required-site-id"
     When _get_cloud_id() resolves the cloud ID for that token
@@ -39,11 +32,6 @@ Scenario: [TOR-02-ePsqZQq] The _get_cloud_id() method shall resolve to the sole 
 # --------------------------------------------------------------------------------------------------
 
 Scenario: [TOR-02-CE3OroW] The OAuth flow shall reject, immediately after authentication, a token whose accessible resources do not include the configured cloud site, raising an error that names both the token's actual accessible site(s) and the required site
-    #
-    # Note:
-    #   1. No such validation exists today anywhere in utils/oauth.py between token exchange
-    #      and caching — this is new behavior, not a fix to an existing check.
-    #
     Given a completed OAuth authentication flow whose resulting token's accessible-resources response is [{"id": "partner-site-id", "name": "Partner Co"}]
     And ATLASSIAN_OAUTH_CLOUD_ID is configured as "required-site-id"
     When the server performs post-auth validation of that token
