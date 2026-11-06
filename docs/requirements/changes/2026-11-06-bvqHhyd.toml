@@ -7,7 +7,6 @@ equivalence = "Not assessed: an edit made before 3.0, recorded by the migration 
 approved_via = "migration"
 approved_by = "decoder-m"
 refs = ["commit da7a1f8e80f9", "PR #8"]
-migration_source = "git da7a1f8e80f9"
 
 [evidence]
 commit = "da7a1f8e80f9"
