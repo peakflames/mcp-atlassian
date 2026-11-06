@@ -3,6 +3,9 @@
 **Phase:** 1 — JIRA & OAuth Correctness Fixes
 **Status:** Complete
 **Dependencies:** —
+**Planned by:** Deniel Moraes
+**Planned:** 2026-07-14
+**Plan branch:** —
 
 ---
 

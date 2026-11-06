@@ -1,12 +1,11 @@
 {
   "feature_id": "01",
   "feature_file": "01-jira-field-completeness.feature.md",
-  "generated": "2026-07-14",
   "generator": "haiku-sub-agent via /peak-workflow:capture-requirements",
   "requirements": [
     {
       "id": "TOR-01-BJ2CyHG",
-      "title": "The jira_get_issue tool shall return every populated field, including custom fields, when called with fields='*all', rather than substituting the default field set",
+      "rationale": "1. Root cause: jira/issues.py line 104 currently reads\n`if fields_param == \"*all\" or fields_set == DEFAULT_READ_JIRA_FIELDS:` and falls\nthrough to `list(DEFAULT_READ_JIRA_FIELDS)` at line 109 — treating '*all' as\nidentical to \"use defaults\". The fix must separate the '*all' branch so it requests\nthe issue's full field catalog instead.",
       "traces_to": {
         "vision": [
           {
@@ -25,7 +24,6 @@
     },
     {
       "id": "TOR-01-9TP0naJ",
-      "title": "The jira_get_issue tool shall return exactly the fields named in an explicit, non-'*all' fields parameter, unaffected by the '*all'-handling fix",
       "traces_to": {
         "vision": [
           {
@@ -44,7 +42,6 @@
     },
     {
       "id": "TOR-01-uzPp7yt",
-      "title": "The jira_get_issue tool shall return a well-formed '*all' response, with no error, for an issue with no populated custom fields beyond the standard set",
       "traces_to": {
         "vision": [
           {
@@ -63,7 +60,7 @@
     },
     {
       "id": "TOR-01-twYUvG9",
-      "title": "The jira_get_issue tool shall exclude custom fields whose value is null or an empty list from '*all' responses, so that LLM context is not flooded with empty field entries on instances with many defined custom fields",
+      "rationale": "1. Root cause: models/jira/issue.py from_api_response() stores every customfield_*\nkey returned by the Jira API (including null values) in self.custom_fields.\nto_simplified_dict() for *all iterates all of them and emits {\"value\": None} dicts.\nThe final `{k: v for k, v in result.items() if v is not None}` filter does not\nremove these because the wrapper dict itself is not None.\n2. Jira returns all defined field keys (including nulls) when fields=*all is requested.\nInstances with thousands of defined custom fields produce thousands of null entries in the\nLLM response context without this filter.",
       "traces_to": {
         "vision": [
           {
@@ -82,7 +79,7 @@
     },
     {
       "id": "TOR-01-sa52UmE",
-      "title": "DEFAULT_READ_JIRA_FIELDS shall contain exactly the 10 essential fields from the upstream sooperset/mcp-atlassian project, with no additional fields, ensuring default responses remain aligned with the upstream contract",
+      "rationale": "1. An earlier iteration expanded DEFAULT_READ_JIRA_FIELDS to 18 fields (adding\nissuelinks, subtasks, parent, components, fixVersions, attachment, resolution,\nresolutiondate). After maintainer feedback and upstream reference review, that\napproach was reversed. Callers needing relationship or custom field data should use\njira_search_fields to discover field IDs and pass them explicitly via the fields\nparameter.\n2. This TOR supersedes TOR-01-el7Cazx (removed), TOR-01-7XlRNfG (removed), and\nTOR-01-NfGirOm (removed), which asserted the expanded 18-field set.",
       "traces_to": {
         "vision": [
           {
