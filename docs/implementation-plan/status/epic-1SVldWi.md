@@ -1,4 +1,5 @@
 status: Complete
+owner: —
 implemented: 2026-07-14
 completed: 2026-07-14
 handoff: session-handoffs/epic-1SVldWi-complete.md
