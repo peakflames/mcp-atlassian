@@ -6,6 +6,7 @@
   "requirements": [
     {
       "id": "TOR-02-s6Jze5H",
+      "rationale": "1. Root cause: src/mcp_atlassian/utils/oauth.py line 328 currently reads\n`self.cloud_id = resources[0][\"id\"]` unconditionally, ignoring any configured\ncloud ID. The fix must search `resources` for an entry matching the configured\nid before falling back to index 0.",
       "title": "The _get_cloud_id() method shall resolve to the accessible-resource matching a configured ATLASSIAN_OAUTH_CLOUD_ID, regardless of the resource's position in the accessible-resources list",
       "traces_to": {
         "vision": [
@@ -63,6 +64,7 @@
     },
     {
       "id": "TOR-02-CE3OroW",
+      "rationale": "1. No such validation exists today anywhere in utils/oauth.py between token exchange\nand caching — this is new behavior, not a fix to an existing check.",
       "title": "The OAuth flow shall reject, immediately after authentication, a token whose accessible resources do not include the configured cloud site, raising an error that names both the token's actual accessible site(s) and the required site",
       "traces_to": {
         "vision": [

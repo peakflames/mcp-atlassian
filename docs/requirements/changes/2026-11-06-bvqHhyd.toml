@@ -1,0 +1,24 @@
+id = "CR-bvqHhyd"
+date = 2026-11-06
+kind = "reword"
+title = "Real cloud site ID in examples replaced by placeholder"
+reason = "On 2026-10-07, PR #8 (chore/scrub-site-identifier) replaced a real Atlassian cloud site ID in the Given/Then example values with the placeholder \"required-site-id\" to keep the identifier out of the repository. The requirement's meaning did not change."
+equivalence = "Not assessed: an edit made before 3.0, recorded by the migration from git history. Historical evidence counts as unproven."
+approved_via = "migration"
+approved_by = "decoder-m"
+refs = ["commit da7a1f8e80f9", "PR #8"]
+migration_source = "git da7a1f8e80f9"
+
+[evidence]
+commit = "da7a1f8e80f9"
+result = "historical"
+
+[[changes]]
+tor = "TOR-02-CE3OroW"
+from = "af70ca69d500"
+to = "8c093eb3c9db"
+
+[[changes]]
+tor = "TOR-02-s6Jze5H"
+from = "aa5475595325"
+to = "8de5b3d302e0"
